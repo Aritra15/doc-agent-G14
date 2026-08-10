@@ -1,7 +1,11 @@
-# Stage 0 — problem statement (one per group). Set by assignment.
-group_id: "G00"
-domain: "almanacs/panjika"
-data_speciality: "degraded-scans"   # ONE hard corpus property (English is not one)
-primary_nfr: "reproducible"
-nfr_target: "p95 latency <= 300ms"   # your concrete committed target
-corpus: {min_pages: 300, min_words: 60000, source_url: "", license: ""}
+# Stage 0 — problem statement (one per group). Set by assignment. Mirrors A1.
+group_id: "G14"
+domain: "bengali-homeopathy"           # historical Bengali homeopathy home-medicine lookup; user = BHMS student / rural practitioner
+data_speciality: "code-switching"      # Bangla script with Latin/Greek remedy names transliterated + Bengali potency numerals (E23)
+primary_nfr: "robust"                  # robust/reliable, optimised as groundedness with 100% citation
+nfr_target: "groundedness >= 0.95 and cited-answer-rate = 1.0"   # every answer carries a book+page cite, or the agent abstains
+corpus:
+  min_pages: 300
+  min_words: 60000
+  source_url: "https://archive.org/details/in.ernet.dli.2015.352816"   # Book A (see data/provenance.md for all books)
+  license: "public-domain"

@@ -1,14 +1,36 @@
-# THE place you set models & parameters. Code reads only from here.
+# THE place you set models & parameters. Code reads only from here. Aligned with A1 (BanglaHomeoRAG).
 seed: 42
-device: cuda
+device: cuda                 # set to "cpu" if running without a GPU (Tesseract is CPU-only; neural OCR fallback wants a GPU)
 
-enhance:   {enabled: true,  model: "unet_small", type: "diffusion"}   # or "vae" / "none"
-layout:    {model: "detectron2:layout", score_thr: 0.5}
-ocr:       {model: "microsoft/trocr-base-printed", finetune: true}    # BASELINE = pretrained OCR
-embed:     {model: "sentence-transformers/all-MiniLM-L6-v2", dim: 384}
-index:     {type: "faiss:hnsw", chunk_tokens: 256, overlap: 32}
-retrieve:  {k: 10, k_step: 10, k_max: 40, weak_threshold: 0.35, rerank: true, reranker: "cross-encoder/ms-marco-MiniLM-L6-v2"}   # k_step/k_max/weak_threshold drive evidence-gated re-search
-agent:     {max_steps: 8, autonomy: "act-with-approval", budget_usd: 0.05}
-rl:        {algo: "ppo", train_policy: false}                         # bonus: set true
+# Stage 1 — generative enhancement OFF: our speciality is code-switching, not degraded scans.
+# We use CLASSICAL preprocessing (deskew / denoise / Sauvola) in ingest/preprocess.py instead. (A1 §5 trade-off.)
+enhance:   {enabled: false, model: "none", type: "none"}
+
+# Stage 2 — layout: separate body vs footnote/header so a dose stays with its remedy entry.
+layout:    {model: "tesseract-layout", score_thr: 0.5}   # Student 1 finalises (heuristic columns vs docTR)
+
+# Stage 3 — OCR BASELINE = pretrained Tesseract 5 (Bengali), with a Bangla-capable neural fallback on low-confidence pages.
+# Tesseract is the reproduced pretrained method for A2 Section 3.
+ocr:
+  engine: "tesseract"
+  lang: "ben"
+  model: "tesseract:ben"
+  fallback: ""             # TODO Student 2: a Bangla-capable checkpoint (Surya / a bn TrOCR) for low-conf re-OCR
+  finetune: false          # baseline first; flip to true only if measured CER forces it
+  conf_threshold: 0.60     # pages below this trigger enhance_page + re-OCR, else abstain (A1)
+
+# Stage 4 — embed: multilingual model that actually covers Bengali (NOT the English MiniLM default).
+embed:     {model: "BAAI/bge-m3", dim: 1024}             # or "sentence-transformers/LaBSE" (dim 768)
+
+# Stage 4 — index: FLAT (exact) — corpus is small; scalable ANN is not our NFR (A1). chunk = one remedy entry, fallback window below.
+index:     {type: "faiss:flat", chunk_tokens: 512, overlap: 64}
+
+# Stage 5 — retrieval + evidence-gated re-search (the mandatory A3 agentic behaviour) + Bangla-capable reranker.
+retrieve:  {k: 10, k_step: 10, k_max: 20, weak_threshold: 0.35, rerank: true, reranker: "BAAI/bge-reranker-v2-m3"}
+
+# Stage 6 — agent: read-only tools, every call logged; escalate_to_human is the one approval gate (A1 §7.3).
+agent:     {max_steps: 6, autonomy: "read-only", budget_usd: 0.05}
+
+rl:        {algo: "ppo", train_policy: false}            # bonus: set true
 serve:     {batch: true}
-deploy:    {target: "hf-spaces"}
+deploy:    {target: "hf-spaces"}                          # FastAPI + Gradio on HF Spaces (A1 §6)
