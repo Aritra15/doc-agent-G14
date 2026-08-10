@@ -1,2 +1,2 @@
-{"page_id": "bk1_p052", "text": "REPLACE ME — exact ground-truth transcription of held-out page bk1_p052 (put the matching page-image at grading_kit/heldout_pages/bk1_p052.jp2). This is the oracle: OCR is scored against it and fresh questions are authored from it."}
-{"page_id": "bk2_p170", "text": "REPLACE ME — exact ground-truth transcription of held-out page bk2_p170 (image at grading_kit/heldout_pages/bk2_p170.jp2)."}
+{"page_id": "bk1_p052", "text": "REPLACE ME — exact ground-truth transcription of held-out page bk1_p052 (put the matching page-image at grading_kit/heldout_pages/bk1_p052.png). This is the oracle: OCR is scored against it and fresh questions are authored from it."}
+{"page_id": "bk2_p170", "text": "REPLACE ME — exact ground-truth transcription of held-out page bk2_p170 (image at grading_kit/heldout_pages/bk2_p170.png)."}

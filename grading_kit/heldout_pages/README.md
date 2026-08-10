@@ -8,8 +8,8 @@ in labels.jsonl) as your OCR matures in A2.
 1. After `bash scripts/get_data.sh`, pick pages spanning the difficulty range:
    clean prose, list-like remedy pages (Bengali potency numerals), foxed/faded
    pages, and footnote-heavy pages — so OCR CER is measured across the real spread.
-2. Copy each chosen page-image here, named by our id convention: `<book>_p<NNN>.jp2`
-   (e.g. `bk1_p052.jp2`, `bk2_p170.jp2`). Same ids used in ../labels.jsonl and the index.
+2. Copy each chosen page-image here (PNG, as produced in data/raw/), named by our id convention:
+   `<book>_p<NNN>.png` (e.g. `bk1_p052.png`, `bk2_p170.png`). Same ids used in ../labels.jsonl and the index.
 3. Hand-transcribe each page EXACTLY (Unicode NFC, keep Bengali numerals ০–৯, keep
    transliterated remedy names as printed) into one JSONL line in ../labels.jsonl:
    `{"page_id": "bk1_p052", "text": "<exact transcription>"}`

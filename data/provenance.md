@@ -1,9 +1,10 @@
 # Corpus provenance — BanglaHomeoRAG (Group 14)
 
 Scanned public-domain Bengali homeopathy manuals from the **Digital Library of India**
-collection on the Internet Archive. These are **scanned page-images** (JP2/PDF), not pre-typed
-text — reading the image is the point of the project. Recreate the corpus with
-`bash scripts/get_data.sh` (raw scans are gitignored, never committed).
+collection on the Internet Archive. These are **scanned page-images**, not pre-typed text —
+reading the image is the point of the project. `bash scripts/get_data.sh` fetches the source
+JP2 page-images and converts them to **PNG** on disk (universal + lossless), landing them in
+`data/raw/<book>/*.png` (raw scans are gitignored, never committed).
 
 ## Books
 
@@ -23,7 +24,8 @@ text — reading the image is the point of the project. Recreate the corpus with
   JaiGyan; all books published 1908–1919, authors long deceased). Freely re-shareable; we ship a
   download script rather than the raw scans to keep the repo small.
 - **Size (to VERIFY after download — A1 estimates):** bk1 alone ≈ 674 pages, djvu.txt ≈ 2.3 MB
-  ≈ 120–150k Bengali words; PDF ≈ 33.9 MB, JP2 page-images ≈ 469 MB. Two confirmed books already
+  ≈ 120–150k Bengali words; source JP2 page-images ≈ 469 MB (larger once converted to PNG on disk).
+  Two confirmed books already
   clear the floor (≥ 300 pages, ≥ 60,000 words). **Update these with real counts from the notebook.**
 - **Scan / script difficulty:** Bangla যুক্তাক্ষর (conjuncts) and matras break under OCR; 1919
   orthography (ৎ, legacy ya-phala/reph, obsolete codepoints) differs from modern Unicode; mixed

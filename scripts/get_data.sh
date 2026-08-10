@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # A1/A2 — fetch the scanned corpus (public-domain Bengali homeopathy manuals) into data/raw/.
 # Downloads page-IMAGES (JP2) from the Internet Archive / Digital Library of India, unzips them,
-# and lays them out as data/raw/<book_id>/*.jp2 so ingest/loader.py can read them.
+# converts them to PNG (universal + lossless), and lays them out as data/raw/<book_id>/*.png
+# so ingest/loader.py — and every teammate's toolchain — can read them without OpenJPEG surprises.
 #
 # Raw scans are gitignored — this script is how the corpus is recreated. Run from repo root:
 #   bash scripts/get_data.sh
 #
-# Self-bootstrapping: it installs any missing prerequisite (unzip, pip, the `ia` CLI) itself.
+# Self-bootstrapping: it installs any missing prerequisite (unzip, pip, the `ia` CLI, Pillow) itself.
 # The Archive items are public, so no login/keys are needed.
 set -euo pipefail
 
@@ -70,6 +71,29 @@ pip_install() {
     || python3 -m pip install --quiet --user --break-system-packages "$pkg"
 }
 
+# Convert every *.jp2 in a folder to *.png (lossless) and drop the JP2 once its PNG exists.
+# JP2s are re-fetchable via this script, so PNG becomes the working page-image format.
+jp2_to_png() {
+  local dir="$1"
+  python3 - "$dir" <<'PY'
+import sys, pathlib
+from PIL import Image
+d = pathlib.Path(sys.argv[1])
+converted = 0
+for p in sorted(d.glob("*.jp2")):
+    png = p.with_suffix(".png")
+    try:
+        if not png.exists():
+            with Image.open(p) as im:
+                im.save(png)
+            converted += 1
+        p.unlink()  # remove the JP2 once its PNG exists
+    except Exception as e:
+        print(f"   !! convert failed {p.name}: {e}", file=sys.stderr)
+print(f"   converted {converted} JP2 -> PNG  ({len(list(d.glob('*.png')))} PNG total in {d})")
+PY
+}
+
 echo ">> Checking prerequisites ..."
 require_cmd unzip unzip
 ensure_python_pip
@@ -78,6 +102,16 @@ if ! command -v ia >/dev/null 2>&1; then
   pip_install internetarchive
 fi
 command -v ia >/dev/null 2>&1 || { echo "!! 'ia' still not on PATH after install." >&2; exit 1; }
+# Pillow (with JPEG-2000 support) for the JP2 -> PNG conversion.
+if ! python3 -c "import PIL" 2>/dev/null; then
+  echo ">> Pillow not found — installing (for JP2 -> PNG conversion) ..."
+  pip_install pillow
+fi
+if ! python3 -c "import sys; from PIL import features; sys.exit(0 if features.check('jpg_2000') else 1)" 2>/dev/null; then
+  echo "!! Pillow has no JPEG-2000 support. Install system OpenJPEG (e.g. '$SUDO apt-get install -y libopenjp2-7')" >&2
+  echo "!! then reinstall Pillow:  python3 -m pip install --force-reinstall pillow" >&2
+  exit 1
+fi
 echo ">> Prerequisites OK."
 
 # ---------------------------------------------------------------------------
@@ -96,29 +130,33 @@ declare -A BOOKS=(
 for book_id in "${!BOOKS[@]}"; do
   identifier="${BOOKS[$book_id]}"
   dest="$RAW/$book_id"
-  # Skip only if PAGE-IMAGES are already there (a pdf-only folder must still fetch the JP2s).
-  if [ -d "$dest" ] && find "$dest" -maxdepth 1 -type f \
-       \( -iname '*.jp2' -o -iname '*.jpg' -o -iname '*.png' \) | grep -q .; then
-    echo ">> $book_id ($identifier) page-images already present in $dest — skipping."
+  mkdir -p "$dest"
+
+  # Already fully processed if PNG page-images exist — skip.
+  if find "$dest" -maxdepth 1 -type f -iname '*.png' | grep -q .; then
+    echo ">> $book_id ($identifier) PNG page-images already present in $dest — skipping."
     continue
   fi
-  mkdir -p "$dest"
-  echo ">> Downloading $book_id  <-  archive.org/details/$identifier"
 
-  # Download the JP2 page-image archive — the real source the pipeline reads (loader -> OCR).
-  ia download "$identifier" --glob="*_jp2.zip" --destdir "$dest" --no-directories || true
+  # Download + unzip only if the JP2s aren't already here (e.g. a prior run stopped mid-convert).
+  if ! find "$dest" -maxdepth 1 -type f -iname '*.jp2' | grep -q .; then
+    echo ">> Downloading $book_id  <-  archive.org/details/$identifier"
+    # JP2 page-image archive — the real source the pipeline reads (loader -> OCR).
+    ia download "$identifier" --glob="*_jp2.zip" --destdir "$dest" --no-directories || true
+    shopt -s nullglob
+    for z in "$dest"/*_jp2.zip; do
+      echo "   unzipping $(basename "$z") ..."
+      unzip -q -o -j "$z" -d "$dest"
+      rm -f "$z"
+    done
+    shopt -u nullglob
+  fi
 
-  # Unzip the JP2 bundle flat into the folder, then drop the zip.
-  shopt -s nullglob
-  for z in "$dest"/*_jp2.zip; do
-    echo "   unzipping $(basename "$z") ..."
-    unzip -q -o -j "$z" -d "$dest"
-    rm -f "$z"
-  done
-  shopt -u nullglob
+  # Convert JP2 -> PNG (lossless) so the corpus is a set of universally-readable *.png.
+  jp2_to_png "$dest"
 
-  n=$(find "$dest" -type f \( -iname '*.jp2' -o -iname '*.jpg' -o -iname '*.png' -o -iname '*.pdf' \) | wc -l)
-  echo "   -> $n files in $dest"
+  n=$(find "$dest" -type f -iname '*.png' | wc -l)
+  echo "   -> $n PNG page-images in $dest"
 done
 
 echo ">> Done. Corpus is in $RAW/. Verify page/word counts in notebooks/eda.ipynb."
