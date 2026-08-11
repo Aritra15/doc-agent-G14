@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
-# A2 — build the vector index (wraps: make ingest index)
+# A2 — build the complete knowledge base exactly once.
 set -euo pipefail
-make ingest index
+python scripts/run_index.py

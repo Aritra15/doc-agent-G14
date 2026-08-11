@@ -1,12 +1,17 @@
 """FIXED config loader."""
+
 from __future__ import annotations
-import yaml
+
 from pathlib import Path
 
+import yaml  # type: ignore[import-untyped]
+
+
 def load(path: str | Path = "configs/config.yaml") -> dict:
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
+
 def load_task(path: str | Path = "configs/task.yaml") -> dict:
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
