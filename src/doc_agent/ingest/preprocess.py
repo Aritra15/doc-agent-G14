@@ -10,11 +10,14 @@ from ..contracts import Page
 
 
 def run(pages: list[Page], cfg: dict) -> list[Page]:
-    """Create deterministic, OCR-ready binary page images with a reusable cache."""
+    """Create cached OCR inputs using passthrough or configurable classical processing."""
     import numpy as np
     from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
     settings = cfg.get("preprocess", {})
+    mode = str(settings.get("mode", "passthrough")).casefold()
+    if mode not in {"passthrough", "classical"}:
+        raise ValueError("preprocess.mode must be 'passthrough' or 'classical'")
     output_dir = Path(cfg.get("paths", {}).get("preprocessed_dir", "data/interim/preprocessed"))
     output_dir.mkdir(parents=True, exist_ok=True)
     median_kernel = int(settings.get("median_kernel", 3))
@@ -23,8 +26,16 @@ def run(pages: list[Page], cfg: dict) -> list[Page]:
     max_skew = float(settings.get("max_skew_degrees", 7.0))
     skew_step = float(settings.get("skew_step", 0.5))
     border_px = int(settings.get("border_px", 24))
+    deskew = bool(settings.get("deskew", False))
+    denoise = bool(settings.get("denoise", False))
+    autocontrast = bool(settings.get("autocontrast", True))
+    sharpen = bool(settings.get("sharpen", False))
+    binarize = bool(settings.get("binarize", False))
+    sharpness_factor = float(settings.get("sharpness_factor", 1.35))
     if max_skew < 0 or skew_step <= 0 or border_px < 0:
         raise ValueError("Invalid preprocessing skew or border configuration")
+    if sharpness_factor <= 0:
+        raise ValueError("preprocess.sharpness_factor must be positive")
 
     def otsu_threshold(array: np.ndarray) -> int:
         histogram = np.bincount(array.ravel(), minlength=256).astype(np.float64)
@@ -88,40 +99,59 @@ def run(pages: list[Page], cfg: dict) -> list[Page]:
 
         with Image.open(source) as opened:
             transposed = ImageOps.exif_transpose(opened)
-            image = (transposed if transposed is not None else opened).convert("L")
-        image = image.filter(ImageFilter.MedianFilter(size=median_kernel))
-        image = ImageOps.autocontrast(image)
-        image = ImageEnhance.Sharpness(image).enhance(1.35)
+            image = (transposed if transposed is not None else opened).copy()
 
-        sample = image.copy()
-        sample.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
         best_angle = 0.0
-        best_score = projection_score(sample)
-        candidate = -max_skew
-        while candidate <= max_skew + 1e-9:
-            rotated_sample = sample.rotate(
-                candidate, resample=Image.Resampling.BICUBIC, expand=False, fillcolor=255
-            )
-            score = projection_score(rotated_sample)
-            if score > best_score:
-                best_score = score
-                best_angle = candidate
-            candidate += skew_step
-        if abs(best_angle) >= 0.05:
-            image = image.rotate(
-                best_angle, resample=Image.Resampling.BICUBIC, expand=False, fillcolor=255
-            )
-
-        gray = np.asarray(image, dtype=np.uint8)
-        threshold = otsu_threshold(gray)
-        binary = np.where(gray <= threshold, 0, 255).astype(np.uint8)
-        result = Image.fromarray(binary, mode="L")
-        if border_px:
-            result = ImageOps.expand(result, border=border_px, fill=255)
+        threshold: int | None = None
+        result = image
+        if mode == "classical":
+            result = result.convert("L")
+            if denoise:
+                result = result.filter(ImageFilter.MedianFilter(size=median_kernel))
+            if autocontrast:
+                result = ImageOps.autocontrast(result)
+            if sharpen:
+                result = ImageEnhance.Sharpness(result).enhance(sharpness_factor)
+            if deskew and max_skew > 0:
+                sample = result.copy()
+                sample.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
+                best_score = projection_score(sample)
+                candidate = -max_skew
+                while candidate <= max_skew + 1e-9:
+                    rotated_sample = sample.rotate(
+                        candidate,
+                        resample=Image.Resampling.BICUBIC,
+                        expand=False,
+                        fillcolor=255,
+                    )
+                    score = projection_score(rotated_sample)
+                    if score > best_score:
+                        best_score = score
+                        best_angle = candidate
+                    candidate += skew_step
+                if abs(best_angle) >= 0.05:
+                    result = result.rotate(
+                        best_angle,
+                        resample=Image.Resampling.BICUBIC,
+                        expand=False,
+                        fillcolor=255,
+                    )
+            if binarize:
+                gray = np.asarray(result, dtype=np.uint8)
+                threshold = otsu_threshold(gray)
+                binary = np.where(gray <= threshold, 0, 255).astype(np.uint8)
+                result = Image.fromarray(binary, mode="L")
+            if border_px:
+                result = ImageOps.expand(result, border=border_px, fill=255)
         result.save(output_path, format="PNG", optimize=True)
         metadata_path.write_text(
             json.dumps(
-                {"fingerprint": fingerprint, "deskew_angle": best_angle, "threshold": threshold},
+                {
+                    "fingerprint": fingerprint,
+                    "mode": mode,
+                    "deskew_angle": best_angle,
+                    "threshold": threshold,
+                },
                 ensure_ascii=False,
                 indent=2,
             ),

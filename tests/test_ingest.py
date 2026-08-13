@@ -23,6 +23,12 @@ def test_ingest_placeholder(tmp_path: Path):
             "preprocessed_dir": str(tmp_path / "interim"),
         },
         "preprocess": {
+            "mode": "classical",
+            "deskew": False,
+            "denoise": True,
+            "autocontrast": True,
+            "sharpen": False,
+            "binarize": True,
             "median_kernel": 3,
             "max_skew_degrees": 1,
             "skew_step": 1,
@@ -38,3 +44,21 @@ def test_ingest_placeholder(tmp_path: Path):
     values = set(np.unique(np.asarray(Image.open(output))).tolist())
     assert values <= {0, 255}
     assert output.with_suffix(".json").exists()
+
+
+def test_passthrough_preserves_source_pixels(tmp_path: Path):
+    import numpy as np
+    from doc_agent.contracts import Page
+    from doc_agent.ingest import preprocess
+    from PIL import Image
+
+    source = tmp_path / "source.png"
+    pixels = np.arange(64, dtype=np.uint8).reshape(8, 8) * 4
+    Image.fromarray(pixels, mode="L").save(source)
+    cfg = {
+        "paths": {"preprocessed_dir": str(tmp_path / "processed")},
+        "preprocess": {"mode": "passthrough"},
+    }
+    output = preprocess.run([Page(id="bk1_p001", image_path=str(source), doc_id="bk1")], cfg)[0]
+    actual = np.asarray(Image.open(output.image_path))
+    assert np.array_equal(actual, pixels)

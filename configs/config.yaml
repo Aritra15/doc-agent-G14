@@ -10,13 +10,25 @@ paths:
   index_dir: "data/interim/index"
 
 preprocess:
+  # Selected A2 default. "passthrough" keeps the source pixels intact while still copying each
+  # page into the standard preprocessed cache consumed by layout/OCR. On five held-out pages it
+  # achieved mean CER 0.1743, versus 0.2129 for the previous aggressive classical pipeline.
+  # Change to "classical" only for a degraded/faded/skewed corpus, then tune the switches below
+  # against held-out CER. Changing any setting automatically invalidates the preprocessing cache.
+  mode: "passthrough"       # passthrough | classical
+  deskew: false             # rotate within max_skew_degrees; enable only for visibly skewed scans
+  denoise: false            # median filter; may erase thin Bengali matras/conjunct strokes
+  autocontrast: true        # conservative classical default; tied with passthrough CER in our test
+  sharpen: false            # can break joined glyph strokes, so it is opt-in
+  binarize: false           # Otsu raised mean CER to 0.2066, so never force it on clean pages
   median_kernel: 3
   max_skew_degrees: 7.0
   skew_step: 0.5
-  border_px: 24
+  sharpness_factor: 1.35
+  border_px: 0
 
 # Stage 1 — generative enhancement OFF: our speciality is code-switching, not degraded scans.
-# We use CLASSICAL preprocessing (deskew / denoise / Sauvola) in ingest/preprocess.py instead. (A1 §5 trade-off.)
+# The preprocessing stage remains present but currently selects its measured passthrough baseline.
 enhance:   {enabled: false, model: "none", type: "none"}
 
 # Stage 2 — layout: separate body vs footnote/header so a dose stays with its remedy entry.

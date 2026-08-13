@@ -21,6 +21,7 @@ echo ">> Working in: $(pwd)"
 # ---------------------------------------------------------------------------
 SUDO=""
 if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi
+PYTHON_BIN=""
 
 # Install a SYSTEM package with whichever package manager this OS has.
 pkg_install() {
@@ -51,31 +52,44 @@ require_cmd() {
 
 # Ensure python3 + pip, then make user-installed console scripts reachable on PATH.
 ensure_python_pip() {
-  require_cmd python3 python3
-  if ! python3 -m pip --version >/dev/null 2>&1; then
+  # Windows Git Bash may expose an unusable Microsoft Store `python3` shim, while the real
+  # interpreter is named `python`. Test execution instead of trusting command -v alone.
+  if command -v python3 >/dev/null 2>&1 && python3 --version >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+  elif command -v python >/dev/null 2>&1 && python --version >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+  else
+    pkg_install python3 || {
+      echo "!! Could not install Python. Install Python 3 manually and re-run." >&2; exit 1; }
+    PYTHON_BIN="python3"
+  fi
+  if ! "$PYTHON_BIN" -m pip --version >/dev/null 2>&1; then
     echo ">> pip not found — bootstrapping ..."
-    python3 -m ensurepip --upgrade >/dev/null 2>&1 || pkg_install python3-pip || {
+    "$PYTHON_BIN" -m ensurepip --upgrade >/dev/null 2>&1 || pkg_install python3-pip || {
       echo "!! Could not install pip. Install python3-pip manually and re-run." >&2; exit 1; }
   fi
   export PATH="$HOME/.local/bin:$PATH"
   local userbin
-  userbin="$(python3 -c 'import site,os; print(os.path.join(site.USER_BASE,"bin"))' 2>/dev/null || true)"
+  userbin="$("$PYTHON_BIN" -c 'import os,sysconfig; scheme="nt_user" if os.name=="nt" else "posix_user"; print(sysconfig.get_path("scripts", scheme=scheme))' 2>/dev/null || true)"
+  if [ -n "$userbin" ] && command -v cygpath >/dev/null 2>&1; then
+    userbin="$(cygpath -u "$userbin")"
+  fi
   [ -n "$userbin" ] && export PATH="$userbin:$PATH"
 }
 
 # Install a PYTHON package, tolerating PEP-668 "externally managed" environments.
 pip_install() {
   local pkg="$1"
-  python3 -m pip install --quiet "$pkg" 2>/dev/null \
-    || python3 -m pip install --quiet --user "$pkg" 2>/dev/null \
-    || python3 -m pip install --quiet --user --break-system-packages "$pkg"
+  "$PYTHON_BIN" -m pip install --quiet "$pkg" 2>/dev/null \
+    || "$PYTHON_BIN" -m pip install --quiet --user "$pkg" 2>/dev/null \
+    || "$PYTHON_BIN" -m pip install --quiet --user --break-system-packages "$pkg"
 }
 
 # Convert every *.jp2 in a folder to *.png (lossless) and drop the JP2 once its PNG exists.
 # JP2s are re-fetchable via this script, so PNG becomes the working page-image format.
 jp2_to_png() {
   local dir="$1"
-  python3 - "$dir" <<'PY'
+  "$PYTHON_BIN" - "$dir" <<'PY'
 import sys, pathlib
 from PIL import Image
 d = pathlib.Path(sys.argv[1])
@@ -103,11 +117,11 @@ if ! command -v ia >/dev/null 2>&1; then
 fi
 command -v ia >/dev/null 2>&1 || { echo "!! 'ia' still not on PATH after install." >&2; exit 1; }
 # Pillow (with JPEG-2000 support) for the JP2 -> PNG conversion.
-if ! python3 -c "import PIL" 2>/dev/null; then
+if ! "$PYTHON_BIN" -c "import PIL" 2>/dev/null; then
   echo ">> Pillow not found — installing (for JP2 -> PNG conversion) ..."
   pip_install pillow
 fi
-if ! python3 -c "import sys; from PIL import features; sys.exit(0 if features.check('jpg_2000') else 1)" 2>/dev/null; then
+if ! "$PYTHON_BIN" -c "import sys; from PIL import features; sys.exit(0 if features.check('jpg_2000') else 1)" 2>/dev/null; then
   echo "!! Pillow has no JPEG-2000 support. Install system OpenJPEG (e.g. '$SUDO apt-get install -y libopenjp2-7')" >&2
   echo "!! then reinstall Pillow:  python3 -m pip install --force-reinstall pillow" >&2
   exit 1
