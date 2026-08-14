@@ -174,3 +174,242 @@ for book_id in "${!BOOKS[@]}"; do
 done
 
 echo ">> Done. Corpus is in $RAW/. Verify page/word counts in notebooks/eda.ipynb."
+
+
+
+
+
+
+
+#!/usr/bin/env bash
+# setup_tesseract.sh
+#
+# Installs Tesseract OCR (with Bengali + English language data) into a
+# USER-SPACE prefix — no sudo, no root, no system package manager involved.
+#
+# How it works:
+#   1. Downloads a tiny static `micromamba` binary (no installer needed).
+#   2. Uses it to create a local conda-forge environment containing
+#      `tesseract`, entirely under $PREFIX (defaults to
+#      $HOME/.local/share/tesseract-env).
+#   3. Downloads any missing language data (ben/eng .traineddata) straight
+#      into that env's tessdata folder — again just a normal file write,
+#      no elevated privileges required anywhere.
+#
+# Safe to re-run — every step is idempotent.
+#
+# Usage:
+#   bash scripts/setup_tesseract.sh
+#
+# Optional env vars:
+#   TESSERACT_ENV_PREFIX   Where to install the env (default: $HOME/.local/share/tesseract-env)
+#   MICROMAMBA_BIN_DIR     Where to put the micromamba binary itself (default: $HOME/.local/bin)
+#
+# On Windows, run this from Git Bash (installed with Git for Windows) or WSL.
+
+set -u   # (deliberately not using `set -e` — we want to control failures ourselves)
+
+REQUIRED_LANGS=("ben" "eng")
+PREFIX="${TESSERACT_ENV_PREFIX:-$HOME/.local/share/tesseract-env}"
+MM_BIN_DIR="${MICROMAMBA_BIN_DIR:-$HOME/.local/bin}"
+MM_BIN="$MM_BIN_DIR/micromamba"
+
+log()  { printf '\033[1;34m[setup]\033[0m %s\n' "$1"; }
+warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$1"; }
+err()  { printf '\033[1;31m[error]\033[0m %s\n' "$1" >&2; }
+
+# ---------------------------------------------------------------------------
+# 1. OS / arch detection (needed to pick the right micromamba build)
+# ---------------------------------------------------------------------------
+detect_os() {
+    case "$(uname -s)" in
+        Linux*)   echo "linux" ;;
+        Darwin*)  echo "mac" ;;
+        CYGWIN*|MINGW*|MSYS*) echo "windows" ;;
+        *)        echo "unknown" ;;
+    esac
+}
+
+detect_arch() {
+    case "$(uname -m)" in
+        x86_64|amd64)  echo "64" ;;
+        aarch64|arm64) echo "arm64" ;;
+        *)             echo "unknown" ;;
+    esac
+}
+
+OS="$(detect_os)"
+ARCH="$(detect_arch)"
+log "Detected OS: $OS ($ARCH)"
+
+micromamba_platform() {
+    case "$OS-$ARCH" in
+        linux-64)    echo "linux-64" ;;
+        linux-arm64) echo "linux-aarch64" ;;
+        mac-64)      echo "osx-64" ;;
+        mac-arm64)   echo "osx-arm64" ;;
+        windows-64)  echo "win-64" ;;
+        *)           echo "" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# 2. Get micromamba itself (a single static binary, no installer, no root)
+# ---------------------------------------------------------------------------
+ensure_micromamba() {
+    if [ -x "$MM_BIN" ]; then
+        log "micromamba already present: $MM_BIN"
+        return 0
+    fi
+    if command -v micromamba >/dev/null 2>&1; then
+        MM_BIN="$(command -v micromamba)"
+        log "Using micromamba already on PATH: $MM_BIN"
+        return 0
+    fi
+
+    local plat
+    plat="$(micromamba_platform)"
+    if [ -z "$plat" ]; then
+        err "Don't know how to fetch micromamba for $OS-$ARCH."
+        err "Install it yourself: https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html"
+        return 1
+    fi
+
+    log "Downloading micromamba ($plat)..."
+    mkdir -p "$MM_BIN_DIR"
+
+    if [ "$OS" = "windows" ]; then
+        # Windows build ships as a .tar.bz2 too; tar is available in Git Bash.
+        curl -Ls "https://micro.mamba.pm/api/micromamba/${plat}/latest" \
+            | tar -xj -O bin/micromamba.exe > "$MM_BIN_DIR/micromamba.exe" \
+            && MM_BIN="$MM_BIN_DIR/micromamba.exe" \
+            && chmod +x "$MM_BIN"
+    else
+        curl -Ls "https://micro.mamba.pm/api/micromamba/${plat}/latest" \
+            | tar -xj -O bin/micromamba > "$MM_BIN" \
+            && chmod +x "$MM_BIN"
+    fi
+
+    if [ ! -x "$MM_BIN" ]; then
+        err "Failed to download/extract micromamba."
+        return 1
+    fi
+    log "micromamba installed at $MM_BIN"
+}
+
+# ---------------------------------------------------------------------------
+# 3. Create/update the local env with tesseract (no root, writes only under $PREFIX)
+# ---------------------------------------------------------------------------
+ensure_tesseract_env() {
+    if [ -x "$PREFIX/bin/tesseract" ] || [ -x "$PREFIX/Library/bin/tesseract.exe" ]; then
+        log "tesseract already installed in $PREFIX"
+        return 0
+    fi
+
+    log "Creating user-space env at $PREFIX (this may take a minute)..."
+    "$MM_BIN" create -y -p "$PREFIX" -c conda-forge tesseract
+    if [ $? -ne 0 ]; then
+        err "micromamba failed to create the environment."
+        return 1
+    fi
+}
+
+find_tesseract_cmd() {
+    if [ -x "$PREFIX/bin/tesseract" ]; then
+        echo "$PREFIX/bin/tesseract"
+    elif [ -x "$PREFIX/Library/bin/tesseract.exe" ]; then
+        echo "$PREFIX/Library/bin/tesseract.exe"
+    else
+        return 1
+    fi
+}
+
+find_tessdata_dir() {
+    for candidate in \
+        "$PREFIX/share/tessdata" \
+        "$PREFIX/Library/share/tessdata" \
+        "$PREFIX/Library/bin/tessdata"
+    do
+        if [ -d "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# 4. Check / fetch language data — plain file writes into our own prefix
+# ---------------------------------------------------------------------------
+has_lang() {
+    local cmd="$1" lang="$2"
+    "$cmd" --list-langs 2>/dev/null | tr -d '\r' | grep -qx "$lang"
+}
+
+download_lang_data() {
+    local cmd="$1"
+    local target_dir
+    target_dir="$(find_tessdata_dir)"
+    if [ -z "$target_dir" ]; then
+        target_dir="$PREFIX/share/tessdata"
+    fi
+    mkdir -p "$target_dir"
+    log "Using tessdata directory: $target_dir"
+
+    for lang in "${REQUIRED_LANGS[@]}"; do
+        if ! has_lang "$cmd" "$lang"; then
+            log "Downloading missing language data: $lang.traineddata"
+            local url="https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/${lang}.traineddata"
+            curl -fsSL "$url" -o "$target_dir/${lang}.traineddata"
+        fi
+    done
+    export TESSDATA_PREFIX="$target_dir"
+}
+
+# ---------------------------------------------------------------------------
+# 5. Main flow
+# ---------------------------------------------------------------------------
+main() {
+    ensure_micromamba || exit 1
+    ensure_tesseract_env || exit 1
+
+    local cmd
+    cmd="$(find_tesseract_cmd || true)"
+    if [ -z "$cmd" ]; then
+        err "tesseract still not found in $PREFIX after install."
+        exit 1
+    fi
+
+    local missing=0
+    for lang in "${REQUIRED_LANGS[@]}"; do
+        if ! has_lang "$cmd" "$lang"; then
+            missing=1
+        fi
+    done
+    if [ "$missing" -eq 1 ]; then
+        log "One or more required languages (${REQUIRED_LANGS[*]}) are missing. Fetching..."
+        download_lang_data "$cmd"
+    fi
+
+    log "Verifying final setup..."
+    "$cmd" --version | head -n1
+    local final_langs
+    final_langs=$("$cmd" --list-langs 2>/dev/null | tr '\n' ' ')
+    log "Available languages: $final_langs"
+
+    for lang in "${REQUIRED_LANGS[@]}"; do
+        if ! has_lang "$cmd" "$lang"; then
+            err "Language '$lang' still not available after setup. Please install it manually."
+            exit 1
+        fi
+    done
+
+    log "✅ Tesseract is installed and ready with Bengali + English support (user-space, no sudo)."
+    log "   Binary: $cmd"
+    log "   Add this to your PATH to use it as just 'tesseract':"
+    log "     export PATH=\"$PREFIX/bin:\$PATH\""
+    log "   And point pytesseract / other tools at TESSDATA_PREFIX if needed:"
+    log "     export TESSDATA_PREFIX=\"$(find_tessdata_dir)\""
+}
+
+main "$@"
