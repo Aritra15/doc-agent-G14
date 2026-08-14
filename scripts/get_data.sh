@@ -90,21 +90,58 @@ pip_install() {
 jp2_to_png() {
   local dir="$1"
   "$PYTHON_BIN" - "$dir" <<'PY'
-import sys, pathlib
+import sys
+import pathlib
 from PIL import Image
-d = pathlib.Path(sys.argv[1])
-converted = 0
-for p in sorted(d.glob("*.jp2")):
+from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor
+import os
+
+def convert_one(p):
+    p = pathlib.Path(p)
     png = p.with_suffix(".png")
+
     try:
         if not png.exists():
             with Image.open(p) as im:
-                im.save(png)
-            converted += 1
-        p.unlink()  # remove the JP2 once its PNG exists
+                # Force decoding while the file is open
+                im.load()
+                im.save(png, format="PNG")
+
+        p.unlink()
+        return True, None
+
     except Exception as e:
-        print(f"   !! convert failed {p.name}: {e}", file=sys.stderr)
-print(f"   converted {converted} JP2 -> PNG  ({len(list(d.glob('*.png')))} PNG total in {d})")
+        return False, f"{p.name}: {e}"
+
+
+if __name__ == "__main__":
+    d = pathlib.Path(sys.argv[1])
+    files = list(d.glob("*.jp2"))
+
+    converted = 0
+    failed = 0
+
+    # Leave 1-2 cores free so the system remains responsive
+    workers = max(1, (os.cpu_count() or 4) - 1)
+
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        results = executor.map(convert_one, files, chunksize=8)
+
+        for ok, error in tqdm(results, total=len(files)):
+            if ok:
+                converted += 1
+            else:
+                failed += 1
+                print(f"!! convert failed: {error}", file=sys.stderr)
+
+    png_count = len(list(d.glob("*.png")))
+
+    print(
+        f"converted {converted} JP2 -> PNG "
+        f"({png_count} PNG total in {d}), "
+        f"{failed} failed"
+    )
 PY
 }
 
