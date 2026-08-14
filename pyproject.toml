@@ -18,6 +18,8 @@ dependencies = [
   "pydantic>=2.7,<3.0",
   "pyyaml>=6.0,<7.0",
   "pydantic-settings>=2.2,<3.0",
+  "pillow>=10.0,<11.0",         # PIL — used in ingest/preprocess, vision/layout, vision/ocr
+  "tqdm>=4.66,<5.0",            # progress bars in vision/layout, vision/ocr, scripts/get_data.sh
 ]
 
 [project.optional-dependencies]
