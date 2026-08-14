@@ -18,6 +18,26 @@ def detect(pages: list[Page], cfg: dict) -> list[Region]:
     from PIL import Image
 
     ocr_cfg = cfg.get("ocr", {})
+
+    # Whole-page mode: skip block segmentation and emit ONE full-page region per page,
+    # so Stage 3 reads the whole page in a single pass (see held-out CER comparison —
+    # block splitting caused catastrophic OCR failures on this single-column corpus with
+    # no benefit). Reversible: set layout.mode: blocks to restore block detection below.
+    # This branch needs no Tesseract call, so it also halves per-page layout time.
+    mode = str(cfg.get("layout", {}).get("mode", "blocks")).strip().lower()
+    if mode == "whole_page":
+        whole_page_regions: list[Region] = []
+        for page in tqdm(pages, desc="Detecting layout (whole-page)"):
+            image_path = Path(page.image_path)
+            if not image_path.exists():
+                raise FileNotFoundError(f"Preprocessed page does not exist: {image_path}")
+            with Image.open(image_path) as image:
+                page_width, page_height = image.size
+            whole_page_regions.append(
+                Region(page_id=page.id, bbox=(0, 0, page_width, page_height), kind="text")
+            )
+        return whole_page_regions
+
     configured_cmd = str(ocr_cfg.get("tesseract_cmd", "")).strip()
     common_windows = Path("C:/Program Files/Tesseract-OCR/tesseract.exe")
     env_prefix = Path(os.environ.get("TESSERACT_ENV_PREFIX", Path.home() / ".local" / "share" / "tesseract-env"))

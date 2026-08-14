@@ -32,7 +32,10 @@ preprocess:
 enhance:   {enabled: false, model: "none", type: "none"}
 
 # Stage 2 — layout: separate body vs footnote/header so a dose stays with its remedy entry.
-layout:    {model: "tesseract-layout", score_thr: 0.5, psm: 3}
+# mode: whole_page = one full-page region per page (single-column corpus; chosen after
+#       held-out CER: whole-page 0.184 vs block-pipeline 0.483, blocks caused catastrophic
+#       failures on ~8 pages). blocks = original Tesseract block segmentation (reversible).
+layout:    {model: "tesseract-layout", mode: "whole_page", score_thr: 0.5, psm: 3}
 
 # Stage 3 — OCR BASELINE = pretrained Tesseract 5 (Bengali), with a Bangla-capable neural fallback on low-confidence pages.
 # Tesseract is the reproduced pretrained method for A2 Section 3.
@@ -43,7 +46,7 @@ ocr:
   tesseract_cmd: "C:/Program Files/Tesseract-OCR/tesseract.exe"
   tessdata_dir: ""
   oem: 1
-  body_psm: 6
+  body_psm: 3              # PSM 3 (full-page auto segmentation) — matches the whole-page layout mode that won the held-out CER test
   heading_psm: 7
   fallback: ""             # TODO Student 2: a Bangla-capable checkpoint (Surya / a bn TrOCR) for low-conf re-OCR
   finetune: false          # baseline first; flip to true only if measured CER forces it

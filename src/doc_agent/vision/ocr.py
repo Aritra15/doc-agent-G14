@@ -59,12 +59,27 @@ class Reader:
         if not image_path.exists():
             raise FileNotFoundError(f"Preprocessed page does not exist: {image_path}")
         with Image.open(image_path) as source:
+            src_width, src_height = source.size
+            source_dpi = source.info.get("dpi")
             left, top, right, bottom = region.bbox
-            crop = source.convert("L").crop((left, top, right, bottom))
-            temporary = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-            temporary_path = Path(temporary.name)
-            temporary.close()
-            crop.save(temporary_path, format="PNG")
+            is_whole_page = (left, top, right, bottom) == (0, 0, src_width, src_height)
+            if is_whole_page:
+                # Whole-page region: OCR the original page image directly. Re-saving a crop
+                # drops the scan DPI, which makes Tesseract PSM 3 mis-segment sparse pages
+                # (observed CER blow-ups on ~5 held-out pages vs the raw full-page pass).
+                # Reading the source keeps DPI and matches the raw full-page result.
+                ocr_target = image_path
+                temporary_path = None
+            else:
+                crop = source.convert("L").crop((left, top, right, bottom))
+                temporary = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                temporary_path = Path(temporary.name)
+                temporary.close()
+                save_kwargs: dict = {"format": "PNG"}
+                if source_dpi:
+                    save_kwargs["dpi"] = source_dpi  # keep DPI so PSM segmentation matches the page
+                crop.save(temporary_path, **save_kwargs)
+                ocr_target = temporary_path
 
         psm = int(
             self.cfg.get("heading_psm", 7)
@@ -73,7 +88,7 @@ class Reader:
         )
         command = [
             tesseract_cmd,
-            str(temporary_path),
+            str(ocr_target),
             "stdout",
             "-l",
             str(self.cfg.get("lang", "ben+eng")),
@@ -98,7 +113,8 @@ class Reader:
                 check=False,
             )
         finally:
-            temporary_path.unlink(missing_ok=True)
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
         if result.returncode != 0:
             raise RuntimeError(
                 f"Tesseract OCR failed for {region.page_id}: {result.stderr.strip()}"
