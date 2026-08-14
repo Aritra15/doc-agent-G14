@@ -30,8 +30,11 @@ def detect(pages: list[Page], cfg: dict) -> list[Region]:
         tesseract_cmd = str(next(p for p in userspace_candidates if p.exists()))
     elif configured_cmd and Path(configured_cmd).exists():
         tesseract_cmd = configured_cmd
-    elif shutil.which(configured_cmd or "tesseract"):
-        tesseract_cmd = shutil.which(configured_cmd or "tesseract") or "tesseract"
+    elif configured_cmd and shutil.which(configured_cmd):
+        tesseract_cmd = shutil.which(configured_cmd) or "tesseract"
+    elif shutil.which("tesseract"):
+        # Configured path missing (e.g. a Windows path on Linux) — fall back to PATH.
+        tesseract_cmd = shutil.which("tesseract") or "tesseract"
     elif common_windows.exists():
         tesseract_cmd = str(common_windows)
     else:
