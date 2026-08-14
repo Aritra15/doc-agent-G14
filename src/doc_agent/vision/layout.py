@@ -7,6 +7,8 @@ import io
 import shutil
 import subprocess
 from pathlib import Path
+import os
+from tqdm import tqdm
 
 from ..contracts import Page, Region
 
@@ -18,7 +20,15 @@ def detect(pages: list[Page], cfg: dict) -> list[Region]:
     ocr_cfg = cfg.get("ocr", {})
     configured_cmd = str(ocr_cfg.get("tesseract_cmd", "")).strip()
     common_windows = Path("C:/Program Files/Tesseract-OCR/tesseract.exe")
-    if configured_cmd and Path(configured_cmd).exists():
+    env_prefix = Path(os.environ.get("TESSERACT_ENV_PREFIX", Path.home() / ".local" / "share" / "tesseract-env"))
+    userspace_candidates = [
+        env_prefix / "bin" / "tesseract",
+        env_prefix / "Library" / "bin" / "tesseract.exe",
+    ]
+
+    if next((p for p in userspace_candidates if p.exists()), None):
+        tesseract_cmd = str(next(p for p in userspace_candidates if p.exists()))
+    elif configured_cmd and Path(configured_cmd).exists():
         tesseract_cmd = configured_cmd
     elif shutil.which(configured_cmd or "tesseract"):
         tesseract_cmd = shutil.which(configured_cmd or "tesseract") or "tesseract"
@@ -35,7 +45,7 @@ def detect(pages: list[Page], cfg: dict) -> list[Region]:
     tessdata_dir = str(ocr_cfg.get("tessdata_dir", "")).strip()
     regions: list[Region] = []
 
-    for page in pages:
+    for page in tqdm(pages, desc="Detecting layout"):
         image_path = Path(page.image_path)
         if not image_path.exists():
             raise FileNotFoundError(f"Preprocessed page does not exist: {image_path}")

@@ -12,6 +12,8 @@ import subprocess
 import tempfile
 import unicodedata
 from pathlib import Path
+import os
+from tqdm import tqdm
 
 from ..contracts import Chunk, Region
 
@@ -30,7 +32,15 @@ class Reader:
 
         configured_cmd = str(self.cfg.get("tesseract_cmd", "")).strip()
         common_windows = Path("C:/Program Files/Tesseract-OCR/tesseract.exe")
-        if configured_cmd and Path(configured_cmd).exists():
+        env_prefix = Path(os.environ.get("TESSERACT_ENV_PREFIX", Path.home() / ".local" / "share" / "tesseract-env"))
+        userspace_candidates = [
+            env_prefix / "bin" / "tesseract",
+            env_prefix / "Library" / "bin" / "tesseract.exe",
+        ]
+
+        if next((p for p in userspace_candidates if p.exists()), None):
+            tesseract_cmd = str(next(p for p in userspace_candidates if p.exists()))
+        elif configured_cmd and Path(configured_cmd).exists():
             tesseract_cmd = configured_cmd
         elif shutil.which(configured_cmd or "tesseract"):
             tesseract_cmd = shutil.which(configured_cmd or "tesseract") or "tesseract"
@@ -132,7 +142,7 @@ def transcribe(regions: list[Region], cfg: dict) -> list[Chunk]:
     cache_dir.mkdir(parents=True, exist_ok=True)
     output: list[Chunk] = []
 
-    for page_id, page_regions in grouped.items():
+    for page_id, page_regions in tqdm(grouped.items(), desc="Transcribing OCR"):
         page_regions = sorted(page_regions, key=lambda region: (region.bbox[1], region.bbox[0]))
         image_path = processed_dir / f"{page_id}.png"
         if not image_path.exists():
