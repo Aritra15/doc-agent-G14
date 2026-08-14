@@ -103,7 +103,10 @@ def detect(pages: list[Page], cfg: dict) -> list[Region]:
         blocks: dict[int, dict[str, int]] = {}
         block_heights: dict[int, list[int]] = {}
         all_word_heights: list[int] = []
-        for row in csv.DictReader(io.StringIO(result.stdout), delimiter="\t"):
+        # QUOTE_NONE: Tesseract TSV is unquoted; a stray " must not make csv swallow rows.
+        for row in csv.DictReader(
+            io.StringIO(result.stdout), delimiter="\t", quoting=csv.QUOTE_NONE
+        ):
             try:
                 if int(row.get("level", "0")) != 5 or not row.get("text", "").strip():
                     continue

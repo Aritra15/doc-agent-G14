@@ -122,7 +122,11 @@ class Reader:
 
         lines: dict[tuple[int, int, int], list[tuple[int, str]]] = {}
         confidences: list[float] = []
-        for order, row in enumerate(csv.DictReader(io.StringIO(result.stdout), delimiter="\t")):
+        # QUOTE_NONE: Tesseract TSV is unquoted; a stray " in an OCR'd word must not make
+        # csv swallow following rows into one field (caused CER 3-4x blow-ups on ~5 pages).
+        for order, row in enumerate(
+            csv.DictReader(io.StringIO(result.stdout), delimiter="\t", quoting=csv.QUOTE_NONE)
+        ):
             text = row.get("text", "").strip()
             if not text:
                 continue
