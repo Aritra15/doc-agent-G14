@@ -1,0 +1,1140 @@
+================================================================
+A2: AI-CHAT TRANSCRIPT
+================================================================
+Member:          Tamzeed Mahfuz
+Student number:  2105012
+Sections led:    Portable Tesseract setup,
+                 sandbox testing,
+                 demo notebooks,
+                 OCR finetuning,
+AI assistant:    Claude (Anthropic), ChatGPT (OpenAI)
+Project:         BanglaHomeoRAG
+================================================================
+
+
+----------------------------------------------------------------
+[TURN 1 — me]
+----------------------------------------------------------------
+import sys, pathlib
+from PIL import Image
+from tqdm import tqdm
+
+d = pathlib.Path(sys.argv[1])
+converted = 0
+for p in tqdm(sorted(d.glob("*.jp2"))):
+    png = p.with_suffix(".png")
+    try:
+        if not png.exists():
+            with Image.open(p) as im:
+                im.save(png)
+            converted += 1
+        p.unlink()  # remove the JP2 once its PNG exists
+    except Exception as e:
+        print(f"   !! convert failed {p.name}: {e}", file=sys.stderr)
+print(f"   converted {converted} JP2 -> PNG  ({len(list(d.glob('*.png')))} PNG total in {d})")
+
+this is too slow. can you make it faster?
+
+----------------------------------------------------------------
+[TURN 1 — AI]
+----------------------------------------------------------------
+Yes. The main problem is that you're doing **JP2 decoding + PNG encoding serially**, which is expensive. You can parallelize the conversions across CPU cores.
+
+A good approach is `ProcessPoolExecutor`, because image decoding/encoding is CPU-heavy and multiprocessing avoids Python's GIL.
+
+```python
+import sys
+import pathlib
+from PIL import Image
+from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor
+
+
+def convert_one(p):
+    p = pathlib.Path(p)
+    png = p.with_suffix(".png")
+
+    try:
+        if not png.exists():
+            with Image.open(p) as im:
+                # Force decoding while the file is open
+                im.load()
+                im.save(png, format="PNG")
+
+        p.unlink()
+        return True, None
+
+    except Exception as e:
+        return False, f"{p.name}: {e}"
+
+
+if __name__ == "__main__":
+    d = pathlib.Path(sys.argv[1])
+    files = list(d.glob("*.jp2"))
+
+    converted = 0
+    failed = 0
+
+    # Leave 1-2 cores free so the system remains responsive
+    workers = max(1, (os.cpu_count() or 4) - 1)
+
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        results = executor.map(convert_one, files, chunksize=8)
+
+        for ok, error in tqdm(results, total=len(files)):
+            if ok:
+                converted += 1
+            else:
+                failed += 1
+                print(f"!! convert failed: {error}", file=sys.stderr)
+
+    png_count = len(list(d.glob("*.png")))
+
+    print(
+        f"converted {converted} JP2 -> PNG "
+        f"({png_count} PNG total in {d}), "
+        f"{failed} failed"
+    )
+```
+
+There's one missing import in that version:
+
+```python
+import os
+```
+
+So put it at the top.
+
+### But there's an even bigger optimization
+
+If you **don't actually need PNG specifically**, don't convert to PNG. JP2 → PNG can be particularly slow because PNG compression itself is CPU-intensive.
+
+If you need PNG because another pipeline requires it, you can make PNG encoding considerably faster by reducing compression:
+
+```python
+im.save(png, format="PNG", compress_level=1)
+```
+
+instead of:
+
+```python
+im.save(png)
+```
+
+`compress_level=1` produces a somewhat larger PNG but is **much faster** to write.
+
+So I'd use:
+
+```python
+def convert_one(p):
+    p = pathlib.Path(p)
+    png = p.with_suffix(".png")
+
+    try:
+        if not png.exists():
+            with Image.open(p) as im:
+                im.load()
+                im.save(png, format="PNG", compress_level=1)
+
+        p.unlink()
+        return True, None
+
+    except Exception as e:
+        return False, f"{p.name}: {e}"
+```
+
+### One important caveat
+
+If you're doing this on **Kaggle**, there's another possibility: the JP2 decoder you're using through Pillow may itself be the bottleneck. In that case, throwing 15–20 processes at it can help a lot, but eventually you'll hit CPU/I/O limits.
+
+I'd start with:
+
+```python
+workers = os.cpu_count()
+```
+
+rather than `cpu_count() - 1` if this is a dedicated Kaggle notebook.
+
+Also, don't use:
+
+```python
+sorted(d.glob("*.jp2"))
+```
+
+unless you actually need alphabetical ordering. Sorting thousands/tens of thousands of paths is unnecessary overhead. `list(d.glob(...))` is enough.
+
+**For a large JP2 dataset, the combination I'd try first is:**
+
+* `ProcessPoolExecutor`
+* `workers = os.cpu_count()`
+* `chunksize=8` or `16`
+* `im.load()`
+* `compress_level=1`
+* delete JP2 only after successful PNG creation
+
+That should be substantially faster than the serial version.
+
+
+----------------------------------------------------------------
+[TURN 2 — me]
+----------------------------------------------------------------
+i am doing a python project where i have to use tesseract 5. i intend to make this project publicly available for other users to use. but other users should not have to manually download tesseract to use my project. can i keep a standalone script that installs tesseract for the project and use it? can you write me a script for that which works properly?
+
+----------------------------------------------------------------
+[TURN 2 — AI]
+----------------------------------------------------------------
+Yes — you can absolutely bundle Tesseract with your Python project, and for a public project this is often a much better user experience than telling users to manually install Tesseract.
+
+The important distinction is:
+
+Don't write a script that runs apt install / brew install / downloads an installer and modifies the user's system. Instead, bundle a Tesseract binary inside your project (or download a pinned binary into your project's directory on first run) and have pytesseract point directly to that binary.
+
+Tesseract itself is Apache 2.0 licensed, so bundling it is generally possible, subject to the licenses of whatever binaries/data you redistribute.
+
+The architecture I'd recommend
+
+Something like:
+
+my_project/
+│
+├── my_project/
+│   ├── __init__.py
+│   ├── ocr.py
+│   └── tesseract_manager.py
+│
+├── third_party/
+│   └── tesseract/
+│       ├── windows/
+│       │   ├── tesseract.exe
+│       │   ├── *.dll
+│       │   └── tessdata/
+│       │       ├── eng.traineddata
+│       │       └── ...
+│       │
+│       ├── linux/
+│       │   └── ...
+│       │
+│       └── macos/
+│           └── ...
+│
+├── pyproject.toml
+└── README.md
+
+Then your Python code does:
+
+import pytesseract
+
+
+pytesseract.pytesseract.tesseract_cmd = "/path/to/your/project/third_party/tesseract/.../tesseract"
+
+So the user simply does:
+
+pip install your-project
+
+and doesn't need to install Tesseract separately.
+
+But there's an important catch
+
+Tesseract isn't just a single executable.
+
+You need:
+
+tesseract executable
+        +
+shared libraries / DLLs
+        +
+tessdata
+
+The tessdata directory contains the trained language models. The official documentation explicitly describes the Tesseract installation as having both the engine and traineddata.
+
+For example, if you only need English:
+
+tesseract/
+├── tesseract.exe
+├── *.dll
+└── tessdata/
+    ├── eng.traineddata
+    └── osd.traineddata
+
+If you're doing Bengali OCR, you'd additionally need:
+
+tessdata/
+├── eng.traineddata
+├── ben.traineddata
+└── osd.traineddata
+There are actually two good approaches
+Approach A — Bundle Tesseract
+
+This is what I'd recommend if you want a reliable, self-contained application.
+
+Your repository/package contains:
+
+third_party/tesseract/
+
+and your code automatically finds the correct executable.
+
+Advantages:
+
+no internet required after installation
+no admin privileges
+doesn't modify PATH
+doesn't interfere with an existing Tesseract installation
+you control the exact Tesseract version
+reproducible
+
+The downside is that your Python package becomes considerably larger.
+
+Approach B — First-run downloader
+
+You could instead have:
+
+pip install my-project
+
+followed by:
+
+from my_project import ocr
+
+and your package detects:
+
+Does bundled Tesseract exist?
+        │
+        ├── YES → use it
+        │
+        └── NO → download pinned Tesseract binary
+                    ↓
+                 ~/.my_project/tesseract/
+                    ↓
+                 use it
+
+This keeps your PyPI package smaller.
+
+But now you have to deal with:
+
+internet availability
+download failures
+OS/architecture detection
+checksums
+proxy/firewall issues
+hosting the binaries
+version updates
+
+For a research/public Python package, I would lean toward bundling, especially if the project is relatively small.
+
+One thing I would NOT do
+
+I wouldn't make your Python package execute:
+
+sudo apt install tesseract-ocr
+
+or:
+
+brew install tesseract
+
+or silently run a Windows installer.
+
+That's because you're now depending on:
+
+the user's OS
+package manager
+permissions
+package repository
+package version
+system configuration
+
+And Linux in particular becomes messy because Tesseract is available through many different distribution package systems. The official documentation recommends the distribution packages for Linux, while Windows Tesseract 5 installers are third-party rather than official Tesseract installers.
+
+I can give you a proper cross-platform installer/manager
+
+If your goal is a publicly distributable Python project, I'd actually structure it a little more carefully than just an install_tesseract.py.
+
+For example:
+
+# tesseract_manager.py
+
+
+from pathlib import Path
+import platform
+
+
+
+
+def get_tesseract_path() -> Path:
+    system = platform.system()
+
+
+    root = Path(__file__).resolve().parent / "third_party" / "tesseract"
+
+
+    if system == "Windows":
+        return root / "windows" / "tesseract.exe"
+
+
+    elif system == "Linux":
+        return root / "linux" / "tesseract"
+
+
+    elif system == "Darwin":
+        return root / "macos" / "tesseract"
+
+
+    raise RuntimeError(f"Unsupported operating system: {system}")
+
+Then:
+
+import pytesseract
+from .tesseract_manager import get_tesseract_path
+
+
+pytesseract.pytesseract.tesseract_cmd = str(get_tesseract_path())
+
+Your application never needs to know where the user installed Tesseract.
+
+And there's an even better packaging option
+
+If this is going to be a real public package, I'd make the Tesseract binaries platform-specific Python package data rather than requiring the user to run a setup script.
+
+Conceptually:
+
+my-project
+    ├── Python code
+    └── bundled Tesseract
+         ├── Windows x64
+         ├── Linux x64
+         └── macOS
+
+Then:
+
+pip install my-project
+
+is genuinely enough.
+
+The main complication is that Windows/Linux/macOS and x86_64/ARM64 need different binaries, so you don't want to blindly ship every binary in every wheel. You can use platform-specific wheels or a first-run downloader.
+
+What I would do for your project
+
+If you tell me:
+
+Which OSes you want to support — Windows only, or Windows + Linux + macOS?
+CPU architectures — x64 only, or ARM too?
+Which languages you need (eng, ben, etc.)
+Whether you're publishing to PyPI
+
+I can write you a complete tesseract_manager.py + pyproject.toml setup that automatically locates the bundled Tesseract, handles tessdata, detects the platform, verifies the executable, and works cleanly when users simply pip install your package.
+
+
+----------------------------------------------------------------
+[TURN 3 — me]
+----------------------------------------------------------------
+i dont want to bundle up tesseract inside my project. im working with collaborators on github, pushing so many tesseract files in the repo is not good. i would be best if i could just include a script and running it will get tesseract in the user's system.
+will it be too difficult if i want to include both windows and linux users?
+
+----------------------------------------------------------------
+[TURN 3 — AI]
+----------------------------------------------------------------
+No — **Windows + Linux is very manageable** if you're okay with the installer script actually installing Tesseract onto the user's machine.
+
+In fact, given your requirements, I think this is a **better design than bundling Tesseract into the repo**.
+
+The key is that you shouldn't try to make one universal "Tesseract installer." Instead, your script detects the OS and uses the appropriate installation mechanism:
+
+```text
+                    install_tesseract.py
+                           │
+                 detect operating system
+                      /           \
+                 Windows          Linux
+                    │                │
+          download Windows      use system
+          Tesseract 5 installer  package manager
+                    │                │
+             run installer       apt/dnf/pacman
+                    │                │
+                    └───────┬────────┘
+                            │
+                    verify installation
+                            │
+                     locate tesseract
+                            │
+                    configure pytesseract
+```
+
+Tesseract's own documentation essentially recommends this model: Tesseract is available through Linux distribution packages, while current Windows installers are provided by UB Mannheim rather than by the core Tesseract project. ([Tesseract OCR][1])
+
+## The Linux side is very easy
+
+For Ubuntu/Debian, it's basically:
+
+```bash
+sudo apt update
+sudo apt install tesseract-ocr
+```
+
+And if you need Bengali:
+
+```bash
+sudo apt install tesseract-ocr-ben
+```
+
+The official documentation lists the language packages in the form `tesseract-ocr-langcode`. ([Tesseract OCR][1])
+
+So your Python installer can execute those commands.
+
+The only annoying part is that **Linux isn't one OS**. You could have:
+
+* Ubuntu/Debian → `apt`
+* Fedora/RHEL → `dnf`
+* Arch → `pacman`
+* openSUSE → `zypper`
+
+But you don't necessarily need to support all of them.
+
+For a research project, I'd start with:
+
+> **Windows 10/11 + Ubuntu/Debian**
+
+and explicitly document that those are the supported platforms. Current Tesseract documentation lists Windows 10/11 and recent Ubuntu/Debian versions among supported operating systems. ([Tesseract OCR][2])
+
+---
+
+# Windows is the slightly annoying part
+
+There isn't currently an official Tesseract Windows installer maintained by the core Tesseract project. The Tesseract documentation points Windows users toward **UB Mannheim's installers**, including current Tesseract 5 versions. ([Tesseract OCR][3])
+
+So your script could:
+
+1. Check whether `tesseract.exe` already exists.
+2. If it does → do nothing.
+3. If it doesn't → download the appropriate UB Mannheim installer.
+4. Run it.
+5. Check that Tesseract was installed.
+6. Find `tesseract.exe`.
+7. Optionally add it to PATH.
+8. Verify:
+
+```bash
+tesseract --version
+```
+
+Then your Python program can simply use:
+
+```python
+pytesseract.pytesseract.tesseract_cmd = path_to_tesseract
+```
+
+---
+
+# I'd actually make the installer a separate script
+
+For example:
+
+```text
+your-project/
+│
+├── install_tesseract.py
+├── requirements.txt
+├── src/
+│   └── ...
+├── README.md
+└── .gitignore
+```
+
+Then your collaborator does:
+
+```bash
+git clone <your-repo>
+cd your-project
+
+python install_tesseract.py
+```
+
+and then:
+
+```bash
+pip install -r requirements.txt
+```
+
+or whatever your normal setup is.
+
+You **don't commit any Tesseract binaries**.
+
+---
+
+# One important design decision
+
+I would **not automatically modify PATH** unless you really need to.
+
+Instead, have your application discover Tesseract.
+
+For example:
+
+```python
+import shutil
+import platform
+from pathlib import Path
+
+
+def find_tesseract():
+    # First: check PATH
+    path = shutil.which("tesseract")
+    if path:
+        return path
+
+    # Windows default installation
+    if platform.system() == "Windows":
+        candidates = [
+            Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
+            Path(r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"),
+        ]
+
+        for path in candidates:
+            if path.exists():
+                return str(path)
+
+    return None
+```
+
+Then:
+
+```python
+import pytesseract
+
+path = find_tesseract()
+
+if path is None:
+    raise RuntimeError(
+        "Tesseract was not found. "
+        "Please run: python install_tesseract.py"
+    )
+
+pytesseract.pytesseract.tesseract_cmd = path
+```
+
+That makes your project much less invasive.
+
+---
+
+# There's another issue you should think about: language data
+
+This is particularly important if you're using Tesseract for **Bengali**.
+
+Installing the Tesseract engine isn't necessarily enough.
+
+Tesseract consists of:
+
+```text
+Tesseract engine
+       +
+traineddata
+```
+
+The official documentation explicitly treats these as separate parts. ([Tesseract OCR][1])
+
+So if your project does:
+
+```python
+pytesseract.image_to_string(image, lang="ben")
+```
+
+the user's machine also needs:
+
+```text
+ben.traineddata
+```
+
+On Ubuntu/Debian, you can install it with:
+
+```bash
+sudo apt install tesseract-ocr-ben
+```
+
+For Windows, you'd need to make sure the Windows installation includes Bengali language data, or download `ben.traineddata` separately into the user's Tesseract `tessdata` directory.
+
+**This is probably the one part I'd explicitly handle in your installer.**
+
+---
+
+# So your final setup could be really nice
+
+User downloads your repository:
+
+```bash
+git clone ...
+cd project
+```
+
+Then:
+
+```bash
+python install_tesseract.py
+```
+
+The script prints something like:
+
+```text
+========================================
+ Tesseract setup
+========================================
+
+Detected OS: Windows
+
+Tesseract not found.
+
+Downloading Tesseract 5.x...
+Installing Tesseract...
+Installing Bengali language data...
+
+Tesseract installation successful!
+
+Tesseract version:
+5.x.x
+
+Location:
+C:\Program Files\Tesseract-OCR\tesseract.exe
+
+========================================
+ Setup complete
+========================================
+```
+
+On Ubuntu:
+
+```text
+========================================
+ Tesseract setup
+========================================
+
+Detected OS: Linux
+Distribution: Ubuntu
+
+Tesseract already installed.
+Version: 5.x.x
+
+Checking Bengali language data...
+Bengali language data found.
+
+Setup complete!
+========================================
+```
+
+And if someone already has Tesseract installed, **the script should leave it alone**.
+
+---
+
+## One thing I would change from your original idea
+
+You said:
+
+> "running it will get tesseract in the user's system"
+
+I'd make it:
+
+> **`install_tesseract.py` installs Tesseract only if it isn't already available.**
+
+That's much friendlier.
+
+And I would **pin the Windows installer version** rather than downloading "whatever the latest version happens to be." Otherwise your project can mysteriously start behaving differently six months later.
+
+So yes: **Windows + Linux is absolutely reasonable**, and I would be comfortable implementing this as a small cross-platform installer script rather than putting Tesseract binaries in GitHub.
+
+If this is your Bengali OCR project, I can write the actual `install_tesseract.py` for **Windows 10/11 + Ubuntu/Debian**, including **Tesseract 5 detection, Windows installer download/install, Linux apt installation, Bengali `ben.traineddata`, version verification, and graceful handling when Tesseract is already installed**.
+
+[1]: https://tesseract-ocr.github.io/tessdoc/Installation.html?utm_source=chatgpt.com "Introduction | tessdoc"
+[2]: https://tesseract-ocr.github.io/tessdoc/supported-operating-systems.html?utm_source=chatgpt.com "Supported Operating Systems | tessdoc"
+[3]: https://tesseract-ocr.github.io/tessdoc/Downloads.html?utm_source=chatgpt.com "Downloads | tessdoc"
+
+
+----------------------------------------------------------------
+[TURN 4 — me]
+----------------------------------------------------------------
+so i ran a tesseract downloader script and downloaded tesseract, it works. now i want to find where the tesseract models are stored. suppose i needed to finetune tesseract on my corpus, where would i put my finetuned model to be used with the project
+
+----------------------------------------------------------------
+[TURN 4 — AI]
+----------------------------------------------------------------
+**Find your current models:**
+
+```bash
+find ~/.local/share/tesseract-env -name "*.traineddata"
+```
+
+That should show `ben.traineddata` and `eng.traineddata` sitting in `~/.local/share/tesseract-env/share/tessdata` — that's the pretrained baseline the pipeline is using right now (the one `config.yaml` calls `tesseract:ben`).
+
+**Where a finetuned model goes — and the good news:** you don't need to touch that shared tessdata folder at all, and you don't need any code changes. Look back at `detect()` in your Stage 2 file — it already reads `ocr.tessdata_dir` from config and passes it as `--tessdata-dir` to the CLI call. That flag was clearly built for exactly this. The only catch: **once you pass `--tessdata-dir`, Tesseract stops looking anywhere else** — every language file named in `-l` (including `eng`) has to exist inside that one directory.
+
+So the setup is:
+
+1. Make a project-local directory for your custom models, e.g. `models/tessdata_custom/` in the repo.
+2. Put your finetuned `.traineddata` file there, named after whatever lang code you'll reference — e.g. `ben_ft.traineddata` (don't overwrite `ben.traineddata`, keep it distinguishable).
+3. Also copy `eng.traineddata` into that same directory (from the tessdata path above), since it needs to be alongside your custom file for the `ben_ft+eng` combo to resolve.
+4. Update `config.yaml`:
+
+```yaml
+ocr:
+  lang: "ben_ft+eng"
+  tessdata_dir: "models/tessdata_custom"
+```
+
+A couple of things worth flagging:
+
+- **Path resolution:** `tessdata_dir` in the code is used as-is (`str(...)`), and `--tessdata-dir` is resolved by Tesseract relative to its own working directory, not necessarily your repo root. If you run the pipeline from somewhere other than the repo root, a relative path like `"models/tessdata_custom"` will break. Safer to either always invoke from repo root, or make the config value an absolute path (or resolve it in Python with `Path(tessdata_dir).resolve()` before passing to the command).
+- **`ocr.model: "tesseract:ben"`** in the config — I don't see that field actually read anywhere in the `detect()` code you shared; only `lang` drives the `-l` flag. So renaming that field is just documentation/bookkeeping for now unless something downstream consumes it — worth checking the rest of the pipeline (Stage 3 OCR proper, not just layout) since this segmentation stage may not be the only place `lang` gets used.
+- Should probably keep `models/tessdata_custom/` out of git if the finetuned file is large (LFS or gitignored + a download step, your call), same way `data/interim` is already gitignored per the config comments.
+
+
+----------------------------------------------------------------
+[TURN 5 — me]
+----------------------------------------------------------------
+- run: uv sync --frozen --extra dev
+      - run: uv run ruff check .
+      - run: uv run black --check .
+      - run: uv run mypy src
+
+these are from a ci pipeline yaml file in github actions. what do these do, and how to make sure my code passes them
+
+----------------------------------------------------------------
+[TURN 6 — AI]
+----------------------------------------------------------------
+Yep. These are basically **CI quality gates**. GitHub Actions is running your project through dependency installation, linting, formatting, and type checking. If any command exits with a non-zero status, the CI job fails.
+
+Here's what each one does.
+
+### 1. `uv sync --frozen --extra dev`
+
+```yaml
+- run: uv sync --frozen --extra dev
+```
+
+This uses **uv** to install your project's dependencies.
+
+* `uv sync` → creates/updates the virtual environment according to your `pyproject.toml` and lockfile (`uv.lock`).
+* `--frozen` → **do not modify `uv.lock`**. CI must use exactly what's already locked.
+* `--extra dev` → also installs the optional `dev` dependency group/extra.
+
+So if your `pyproject.toml` has something like:
+
+```toml
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "black",
+    "mypy",
+]
+```
+
+then CI installs those too.
+
+**Potential failure:** your `pyproject.toml` and `uv.lock` aren't synchronized.
+
+Locally, run:
+
+```bash
+uv sync --extra dev
+```
+
+If that changes `uv.lock`, commit the updated `uv.lock`.
+
+Then:
+
+```bash
+uv sync --frozen --extra dev
+```
+
+should work.
+
+---
+
+### 2. `uv run ruff check .`
+
+```yaml
+- run: uv run ruff check .
+```
+
+This runs **Ruff**, a Python linter, over the entire repository.
+
+It looks for things like:
+
+```python
+import os
+import sys
+```
+
+where `sys` isn't used, problematic imports, undefined names, suspicious code, style violations, etc., depending on your Ruff configuration.
+
+If Ruff finds errors, CI fails.
+
+Run exactly what CI runs locally:
+
+```bash
+uv run ruff check .
+```
+
+If it reports problems, fix them.
+
+Ruff can automatically fix many of them:
+
+```bash
+uv run ruff check . --fix
+```
+
+Then run:
+
+```bash
+uv run ruff check .
+```
+
+again.
+
+**Important:** don't blindly use `--fix` if you aren't sure what it changed. Check `git diff`.
+
+---
+
+### 3. `uv run black --check .`
+
+```yaml
+- run: uv run black --check .
+```
+
+This checks whether your Python code has been formatted by **Black**.
+
+For example, you might write:
+
+```python
+foo = {"a":1,"b":2}
+```
+
+Black wants:
+
+```python
+foo = {"a": 1, "b": 2}
+```
+
+The important part is:
+
+```text
+--check
+```
+
+It **doesn't modify your files**. It just checks whether they already conform to Black's formatting.
+
+Run:
+
+```bash
+uv run black --check .
+```
+
+If it says files would be reformatted, run:
+
+```bash
+uv run black .
+```
+
+Then check:
+
+```bash
+uv run black --check .
+```
+
+---
+
+### 4. `uv run mypy src`
+
+```yaml
+- run: uv run mypy src
+```
+
+This is **static type checking**.
+
+Mypy looks at your Python type annotations and tries to find type inconsistencies before your program runs.
+
+For example:
+
+```python
+def add(a: int, b: int) -> int:
+    return a + b
+```
+
+is fine.
+
+But:
+
+```python
+def add(a: int, b: int) -> int:
+    return "hello"
+```
+
+would be caught by mypy.
+
+Another example:
+
+```python
+name: str = 123
+```
+
+would fail.
+
+The important difference here is that they're running:
+
+```bash
+mypy src
+```
+
+rather than:
+
+```bash
+mypy .
+```
+
+So **mypy is checking your `src/` directory**, presumably where your actual package code lives.
+
+Run:
+
+```bash
+uv run mypy src
+```
+
+locally and fix whatever it reports.
+
+---
+
+# The easiest way to make sure CI passes
+
+You don't need to guess what GitHub Actions will do.
+
+**Run exactly the same four commands locally before pushing.**
+
+From your repository root:
+
+```bash
+uv sync --frozen --extra dev
+uv run ruff check .
+uv run black --check .
+uv run mypy src
+```
+
+If all four succeed, you're in very good shape.
+
+You can even make yourself a little local CI command:
+
+```bash
+uv sync --frozen --extra dev
+uv run ruff check .
+uv run black --check .
+uv run mypy src
+```
+
+---
+
+## A very useful workflow
+
+When you're actively developing, I would usually do:
+
+```bash
+# 1. Install/sync dependencies
+uv sync --extra dev
+
+# 2. Automatically fix easy lint problems
+uv run ruff check . --fix
+
+# 3. Format code
+uv run black .
+
+# 4. Check linting
+uv run ruff check .
+
+# 5. Check formatting
+uv run black --check .
+
+# 6. Type check
+uv run mypy src
+```
+
+Then commit:
+
+```bash
+git status
+git diff
+git add .
+git commit
+git push
+```
+
+GitHub Actions should then reproduce those checks.
+
+---
+
+# One subtle thing: Ruff and Black can disagree
+
+This is worth knowing.
+
+Ruff and Black overlap somewhat in formatting/style territory. Usually projects configure Ruff so that they coexist cleanly.
+
+For example, your `pyproject.toml` might contain something like:
+
+```toml
+[tool.ruff]
+line-length = 88
+
+[tool.black]
+line-length = 88
+```
+
+If your project already has a `pyproject.toml`, **look at its `[tool.ruff]`, `[tool.black]`, and `[tool.mypy]` sections** before changing anything.
+
+The CI commands themselves don't tell you the exact rules. The configuration in `pyproject.toml` does.
+
+---
+
+## And `--frozen` is particularly important
+
+Suppose you add:
+
+```bash
+uv add requests
+```
+
+This changes both:
+
+```text
+pyproject.toml
+uv.lock
+```
+
+That's fine.
+
+But suppose you manually edit `pyproject.toml` to add:
+
+```toml
+"requests"
+```
+
+without updating `uv.lock`.
+
+Then CI does:
+
+```bash
+uv sync --frozen
+```
+
+and can fail because the lockfile doesn't correspond to the project configuration.
+
+So after changing dependencies, let `uv` update the lockfile:
+
+```bash
+uv add requests
+```
+
+rather than manually editing the dependency list whenever possible.
+
+---
+
+### In short
+
+| CI command                     | Purpose                           | Local fix                   |
+| ------------------------------ | --------------------------------- | --------------------------- |
+| `uv sync --frozen --extra dev` | Install exact locked dependencies | `uv sync --extra dev`       |
+| `uv run ruff check .`          | Lint code                         | `uv run ruff check . --fix` |
+| `uv run black --check .`       | Check formatting                  | `uv run black .`            |
+| `uv run mypy src`              | Static type checking              | Fix reported type errors    |
+
+**The golden rule:** don't just run `black` and `ruff` randomly and hope. Run the **exact CI commands locally** before pushing. That gives you almost exactly the same quality checks GitHub will perform.
