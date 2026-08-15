@@ -1,0 +1,703 @@
+==========================================================================
+A2 — AI-CHAT TRANSCRIPT: EVIDENCE, LABEL INTEGRITY & REPRODUCIBILITY
+==========================================================================
+Member:          Zaki Rehnoom Unmona
+Student number:  2105016
+Project:         BanglaHomeoRAG
+Sections led:    Section 3 (OCR/HTR row), Section 4 (knowledge base built,
+                 pipeline diagram, reproducibility), Section 5 (evidence:
+                 OCR quality, index statistics, retrieval example, worst
+                 failure), Section 7 (eight-facet design table, all four
+                 stages), plus submission-structure integrity (A2_form.docx
+                 recovery, notebook/manifest grounding, per-member
+                 transcripts).
+Work documented: PART 1 -- Ground-truth methodology for the held-out OCR
+                 evaluation set; catching that our 30 held-out labels were
+                 unverified Qwen output and building a human-proofing
+                 workflow instead of accepting AI-transcribed "ground
+                 truth"; the whole-page-vs-block-OCR benchmarking that first
+                 decided our Section 3 OCR/layout choice; building and
+                 debugging the Kaggle notebook that runs the full
+                 ingest->OCR->chunk->embed->index pipeline; closing the
+                 reproducibility gaps that would have stopped the grader
+                 from re-running our pipeline (Tesseract missing from the
+                 Docker image, pillow/tqdm undeclared as dependencies, an
+                 empty requirements.lock, no uv.lock, doc_agent unimportable
+                 under the src/ layout); verifying the pipeline.py timing
+                 edit against the structure-lock test; the A3 OCR
+                 fine-tuning strategy and how a fine-tuned checkpoint would
+                 actually reach the grader.
+                 PART 2 -- Finishing the whole-page OCR switch: diagnosing
+                 and fixing the DPI/crop bug and the Tesseract-TSV
+                 QUOTE_NONE quote-swallowing bug that were still corrupting
+                 CER after the initial fix, verified with an in-notebook
+                 test built specifically to avoid another blind push; a
+                 full A2 submission-requirement audit against the actual
+                 A2_form.docx rubric text (not just the generic
+                 walkthrough), producing the graded gap checklist; drafting
+                 configs/design_choices.md and reports/pipeline_diagram.md
+                 from only the evidence actually measured; reviewing
+                 teammates' executed kb_demo.ipynb/eda.ipynb, finding a
+                 second, independent QUOTE_NONE bug living inside eda.ipynb's
+                 own standalone code (not the shared pipeline), and finding
+                 and fixing a remedy-alias marker self-collision bug in
+                 chunk.py directly from real corrupted retrieval output;
+                 tracing which Kaggle notebook actually built the shipped
+                 index to confirm which fixes reached it; recovering
+                 forms/A2_form.docx after a teammate's independent push left
+                 it structurally corrupted (14 tables instead of 16) rather
+                 than a clean two-sided conflict, by rebuilding from the
+                 original template and reapplying every fill in one
+                 verified pass; adding a scoped bk1 page/word-count section
+                 to eda.ipynb and catching a tqdm-import regression I had
+                 introduced; and verifying this transcript's own factual
+                 claims against git history before adding the missing
+                 "Sections led" field.
+AI assistant:    Claude (Anthropic), via Claude Code, used as the primary
+                 planning / debugging / infrastructure assistant for the
+                 work above.
+
+Disclosure:      This is a faithful reconstruction of the actual working
+                 conversation used during A2, drawn from two Claude Code
+                 sessions (Part 1: early A2 work; Part 2: submission
+                 finalization). My prompts retain their original intent;
+                 the assistant's replies are condensed from much longer
+                 sessions for readability — the underlying reasoning,
+                 numbers, and file changes quoted below are the ones
+                 actually produced/applied during the sessions, not
+                 invented for this document. Sections I did not personally
+                 lead (the chunking/embedding/index implementation, most of
+                 vision/ocr.py and vision/layout.py authorship, the
+                 eda.ipynb corpus stats) are documented in my teammates'
+                 transcripts, not here.
+==========================================================================
+
+
+--------------------------------------------------------------------------
+[TURN 1 — ME]
+--------------------------------------------------------------------------
+Hey can you explain what is the ground truth here in this project and how
+are we supposed to get it?
+
+--------------------------------------------------------------------------
+[TURN 1 — AI]
+--------------------------------------------------------------------------
+Ground truth = the known-correct answer you measure your system against.
+The key fact for this project: it does not exist anywhere — you create it
+by hand, from the images. Your books are scanned photographs with no
+reliable digital transcript (that's exactly why Project Gutenberg is
+banned as a source: its books are already typed, so there'd be nothing to
+read). The only source of truth is a human looking at a scanned page and
+writing down what it actually says.
+
+For A2 specifically, the ground truth you need is the OCR evaluation set:
+~20-30 held-out pages, hand-transcribed *diplomatically* (Unicode NFC,
+keep 1919 orthography, Bengali numerals, and real English/Latin terms as
+printed — do not modernize or "fix" anything), human-verified, stored in
+grading_kit/labels.jsonl. It must never be trained/tuned on. There are
+actually four different ground truths in the project (OCR labels ->
+CER; canonical remedy aliases; retrieval gold pages; answer gold+citation
+in A3) but only the first is needed now.
+
+--------------------------------------------------------------------------
+[TURN 2 — ME]
+--------------------------------------------------------------------------
+We are currently preparing the thirty held out pages using Qwen3.5-9B.
+But I still don't understand the purpose of the raw corpus. Or what we
+are supposed to do next. What is the purpose of the heldout pages. How
+does OCR work? How are we gonna train the whole thing? How are we gonna
+prepare labeled data? Please explain everything like I don't understand
+anything at all
+
+--------------------------------------------------------------------------
+[TURN 2 — AI]
+--------------------------------------------------------------------------
+Stop and read this first: if Qwen's raw output is going straight into
+labels.jsonl, that breaks the measurement. The held-out labels are the
+answer key — if a model wrote the answer key, the answer key has the
+model's mistakes baked in, and comparing your OCR to it tells you nothing
+real. If your OCR makes the same mistakes as Qwen, your CER looks falsely
+low; if it makes different mistakes, falsely high. Either way it's
+meaningless, and it won't match the grader's own human-checked pages.
+Qwen can produce a first *draft* that a human then corrects against the
+image — the human correction is what makes it ground truth, not the model
+output.
+
+Then, ground-up: data/raw/ is the corpus (the "library"); a scanned page
+is a photograph, not text, which is why OCR exists; OCR = a pretrained
+model predicting characters from pixel shapes, and Bengali is hard here
+because of conjuncts/matras/code-switching. Held-out pages are the exam
+answer key for grading OCR, kept unseen so the score is honest, and later
+double as the source of A3 test questions. On training: you mostly DON'T
+train anything — Tesseract, the BGE-m3 embedder, and the eventual
+answering LLM are all pretrained models you *run*, not train. "Reproduce
+a pretrained method" means run an existing trained model, which running
+Tesseract already satisfies. Labeled data at this stage means evaluation
+labels (the held-out set), not training data.
+
+--------------------------------------------------------------------------
+[TURN 3 — ME]
+--------------------------------------------------------------------------
+The automatic grader re-measures OCR against its own hidden held-out
+pages. Where will it get its own hidden held out pages?
+
+--------------------------------------------------------------------------
+[TURN 3 — AI]
+--------------------------------------------------------------------------
+From your own corpus — every team's books are different, so there's no
+universal secret set. Mechanically: grading_kit/manifest.yaml is "the
+single entry point a grader opens." It points to your heldout_pages/,
+labels.jsonl, and the build/run entrypoints (build_index.sh). The grader
+runs YOUR pipeline on YOUR held-out images and recomputes CER against
+YOUR labels itself, rather than trusting the number you typed — that's
+what makes it "hidden": independently recomputed, not self-reported. It's
+possible staff also hold back a separately-transcribed slice of your same
+books, but either way the source is always your corpus. Practical
+consequences: report real numbers (they'll be recomputed), never train on
+held-out pages, keep the pipeline reproducible enough that the grader's
+re-run actually succeeds, and keep the labels honestly human-verified.
+
+--------------------------------------------------------------------------
+[TURN 4 — ME]
+--------------------------------------------------------------------------
+Check out all the changes from the latest pull. is it relevant
+
+--------------------------------------------------------------------------
+[TURN 4 — AI]
+--------------------------------------------------------------------------
+[Reviewed commits f3de748 "written codes in src/ingest and src/vision...",
+70fb271 "held out page and labels generated with qwen have been added",
+17fceb9 "ocr quality degrades with this pipeline, so shifted to a
+passthrough alternative".]
+
+Good engineering overall — caching with fingerprints, atomic writes,
+Tesseract run as ben+eng (took the code-switching point). Two real
+problems:
+1. The labels.jsonl committed by 70fb271 look unverified. bk1_p070 has
+   "খতু j:" — a printed 1919 Bengali page would never contain a bare
+   Latin "j:" — and the same running header is spelled two different ways
+   across pages (bk1_p062 "ওলাউঠা" vs bk1_p070 "ওলাডটা"). Those are
+   Qwen-transcription artifacts, not ground truth.
+2. The pipeline still does region OCR: layout.py finds Tesseract blocks,
+   then ocr.py crops and re-OCRs each block separately, and your own
+   smoke test showed region OCR (0.211) is worse than full-page (0.124)
+   on the same two pages. Worth re-measuring on the full set before
+   trusting the number.
+
+--------------------------------------------------------------------------
+[TURN 5 — ME]
+--------------------------------------------------------------------------
+okay [confirming the plan to fix the labels honestly rather than trust
+the Qwen drafts]
+
+--------------------------------------------------------------------------
+[TURN 5 — AI]
+--------------------------------------------------------------------------
+I won't "fix" the labels by re-reading the images myself — I'm a model
+too, so that just swaps Qwen's unverified reading for mine; it doesn't
+create ground truth. What I can do reliably: flag mechanical artifacts
+(the "j:", the inconsistent header) that are wrong regardless of Bengali
+fluency, and build a proofing tool that puts a fluent human where they're
+actually irreplaceable. Built a self-contained local HTML page: each
+held-out scan next to its editable Qwen-draft label, a running edited-
+count, a full-res zoom link, and a "download corrected labels.jsonl"
+button that exports in the same page-id order so it drops straight back
+into grading_kit/labels.jsonl. [Ran a mechanical-artifact scan across all
+30 labels first — found that most flagged "Latin" content, e.g. "cholera",
+"Bacilli", "Hughes", was genuine code-switching content, not errors, so a
+blanket rule-based fix would have deleted real data speciality evidence.]
+
+--------------------------------------------------------------------------
+[TURN 6 — ME]
+--------------------------------------------------------------------------
+Check the recent git pulls [second review, after teammates pushed
+1c5d35e "add time logging in pipeline build knowledge base",
+7c05f24 "modified layout and ocr for tesseract",
+d71760a "added tesseract installer script",
+5bf1d5e "enabled parallel processing in jp2 to png conversion"]
+
+--------------------------------------------------------------------------
+[TURN 6 — AI]
+--------------------------------------------------------------------------
+Checked whether any FIXED file changed: pipeline.py did (1c5d35e added
+`import time` + print() timing around each stage). Diffed it — the stage
+order and every hooks.run()/register_all() call are untouched, only
+print/timing lines were added, so it cannot break the structure-lock test
+(which only checks symbol existence, not pipeline.py's body — confirmed
+by reading tests/test_structure.py directly). Real, separate problem: the
+new tqdm import in layout.py/ocr.py/get_data.sh is not declared anywhere
+in pyproject.toml — works on Kaggle (tqdm preinstalled) but will
+ImportError on a fresh grader machine. Also confirmed 7c05f24 only added
+a userspace-Tesseract path lookup and progress bars — the region-vs-full-
+page OCR question from Turn 4 is still open.
+
+--------------------------------------------------------------------------
+[TURN 7 — ME]
+--------------------------------------------------------------------------
+Help me create a kaggle notebook to clone the whole github and run the
+pipeline
+
+--------------------------------------------------------------------------
+[TURN 7 — AI]
+--------------------------------------------------------------------------
+Built banglahomeorag_build_kb.ipynb: (1) clone the repo + apt-get install
+tesseract-ocr tesseract-ocr-ben unzip; (2) pip install the deps not
+already on the Kaggle image (sentence-transformers, faiss-cpu,
+internetarchive, pydantic-settings, jiwer); (3) run scripts/get_data.sh;
+(4) an optional commented-out subsample cell (keep first N pages/book);
+(5) call pipeline.build_knowledge_base(cfg) directly via
+sys.path.insert(0,'src') rather than trusting the run_ingest.py/
+run_index.py stubs; (6) print index stats from store.load(cfg); (7) a
+guarded one-query retrieval demo; (8) a held-out CER cell using full-page
+Tesseract + jiwer.cer against labels.jsonl, printed per page and averaged.
+
+--------------------------------------------------------------------------
+[TURN 8 — ME]
+--------------------------------------------------------------------------
+yes [add a cell that runs the actual pipeline's region OCR on the held-out
+images so pipeline CER and full-page CER can be compared side by side]
+
+--------------------------------------------------------------------------
+[TURN 8 — AI]
+--------------------------------------------------------------------------
+Added cell 7b: constructs a Page for each held-out image under a distinct
+`eval_<page_id>` id (so it can never collide with the corpus build's own
+page-id cache), runs it through the real preprocess.run -> layout.detect
+-> ocr.transcribe stages, and prints pipeline CER next to full-page CER
+per page and as a mean, with a one-line verdict on which OCR path to keep.
+
+--------------------------------------------------------------------------
+[TURN 9 — ME]
+--------------------------------------------------------------------------
+alright, tesseract is portable and on kaggle the pipeline is working on
+20 pages. But it's output is wrong. How are we supposed to fix that? We
+need to build the whole knowledge base, right? What exactly are we
+supposed to do more for A2?
+
+--------------------------------------------------------------------------
+[TURN 9 — AI]
+--------------------------------------------------------------------------
+Reframed first: imperfect OCR on 1919 Bengali is expected, not a bug —
+you don't need perfect OCR to build the KB or pass A2; that's exactly why
+there's a CER number, a confidence gate, and abstention downstream.
+Triage before "fixing" anything: if CER is ~0.12-0.20 that's normal and
+you report it; if it's much higher or the text is empty/garbage, that's a
+real bug, most likely the still-unswitched region OCR. Then the full
+remaining-work checklist, in priority order: fix reproducibility
+(Dockerfile Tesseract + a real lockfile) so the grader can even run the
+pipeline; build the full index over both books; finish verifying labels;
+get OCR CER + one retrieval example + index stats for Section 5; then
+kb_demo.ipynb, the A2 form, design_choices.md, pipeline_diagram.md, and
+per-member transcripts; tag a2-submit.
+
+--------------------------------------------------------------------------
+[TURN 10 — ME]
+--------------------------------------------------------------------------
+yes [do the Dockerfile + pyproject.toml reproducibility fix]
+
+--------------------------------------------------------------------------
+[TURN 10 — AI]
+--------------------------------------------------------------------------
+Checked the Dockerfile and found it never installs Tesseract at all, and
+`pip install -r requirements.lock` installs nothing because the lockfile
+was still the empty stub — so on a fresh grader machine the pipeline
+would fail before OCR ever runs. Also found pillow was imported by
+preprocess.py/ocr.py/layout.py but never declared as a dependency either
+(same class of bug as tqdm from Turn 6). Added `pillow>=10.0,<11.0` and
+`tqdm>=4.66,<5.0` to pyproject.toml's dependencies (17 deps total).
+Rewrote the Dockerfile: `apt-get install tesseract-ocr tesseract-ocr-ben`,
+kept `pip install -r requirements.lock`, and added
+`ENV PYTHONPATH=/app/src` since the src/ layout means `import doc_agent`
+would otherwise fail even with every dependency present. Flagged that
+requirements.lock is still empty — that has to be generated before either
+fix actually takes effect.
+
+--------------------------------------------------------------------------
+[TURN 11 — ME]
+--------------------------------------------------------------------------
+[pasted] error: externally-managed-environment ... Command 'uv' not
+found. Will this not cause a system wide change? ... why is the
+requirements.lock file all red? [pasted VS Code settings.json]
+
+--------------------------------------------------------------------------
+[TURN 11 — AI]
+--------------------------------------------------------------------------
+The pip PEP-668 error is Debian blocking a system-wide install; the fix
+is uv's own installer (`curl -LsSf https://astral.sh/uv/install.sh | sh`),
+which drops a single binary into ~/.local/bin — no sudo, no system Python
+touched, confirmed that's exactly why it needs no `--break-system-
+packages` override. After `uv lock` + `uv export --no-hashes --no-dev -o
+requirements.lock` produced a real 414-line lockfile, diagnosed the "all
+red" as VS Code's git-Modified decoration plus its language-detection
+model mis-guessing the file as YAML from its content (it's pip-
+requirements format, not YAML) — not an error in the file. Added a
+`files.associations` block directly to the user's
+~/.config/Code/User/settings.json (`requirements.lock: pip-requirements`,
+`uv.lock: toml`) to stop the false-positive. Separately noticed `uv sync`
+had created a 3GB local .venv/ — confirmed it's gitignored and harmless,
+and that only `uv lock`/`uv export` were actually needed for the fix.
+
+--------------------------------------------------------------------------
+[TURN 12 — ME]
+--------------------------------------------------------------------------
+Why does it say fine-tuned ocr [pointing at the Codebase Guide's build-
+order line] ... But my question was if I finetune the OCR, then how will
+the autograder use it then? ... Should we focus on the size or the
+accuracy of the OCR while choosing?
+
+--------------------------------------------------------------------------
+[TURN 12 — AI]
+--------------------------------------------------------------------------
+Owned an earlier overstatement: the Codebase Guide's build order and the
+config's `finetune: true` default do frame fine-tuning as the intended
+baseline, which conflicts with the A2 form's own language, where
+"reproduce" is defined as "ran an existing trained model rather than only
+citing it" and Section 4 explicitly lists "pretrained" as a valid column
+value — so a justified pretrained answer is gradeable but weaker against
+the guide's framing; recommended asking the TA directly rather than
+guessing on a 20-point section. On delivery: the grader never retrains
+anything — it loads and runs whatever model your config points to, so a
+fine-tuned checkpoint has to be reachable on a fresh machine (checkpoints
+aren't in git); Hugging Face Hub with a pinned revision is the clean path
+for a neural model, a committed .traineddata is small enough to just
+commit for a fine-tuned Tesseract. On size vs accuracy: accuracy wins,
+because the chosen NFR is groundedness (not memory/latency) and OCR
+quality caps everything downstream (retrieval, grounding, citation); size
+only matters as a tie-breaker, and the heavy model can be tiered — cheap
+Tesseract on clean pages, an accurate fallback only on low-confidence
+ones, run offline during the index build so it never has to load at
+serving time.
+
+--------------------------------------------------------------------------
+[TURN 13 — ME]
+--------------------------------------------------------------------------
+yes [run pytest tests/test_structure.py to settle whether the pipeline.py
+timing edit is safe]
+
+--------------------------------------------------------------------------
+[TURN 13 — AI]
+--------------------------------------------------------------------------
+Read tests/test_structure.py in full before running anything: it only
+asserts required module/callable names exist (`REQUIRED`, `REQUIRED_V2`,
+`REQUIRED_XCUT` dicts of `hasattr` checks), the exact parameter names of
+Agent.run, the exact tool-name set, and the exact seam-name set — nothing
+inspects pipeline.py's function body, so the Turn-6 timing edit cannot
+fail it. Attempted `uv run --with pytest -- pytest tests/test_structure.py
+-q` to confirm live; it was killed by the shell's own timeout while still
+importing torch/transformers/lightning (exit 143 = terminated, not a test
+failure, empty output) — noted this honestly rather than reporting a false
+pass, and left the conclusion as "passes by inspection of the test file
+itself; CI will confirm."
+
+
+==========================================================================
+PART 2 — SUBMISSION FINALIZATION (later working session)
+==========================================================================
+
+--------------------------------------------------------------------------
+[TURN 14 — ME]
+--------------------------------------------------------------------------
+[Pasted a Kaggle run of the whole-page-OCR validation notebook.] page
+pipeline  full-page ... MEAN 0.184 0.184 => pipeline (region) wins. [Then a
+second block:] in-pipeline whole-page MATCHES raw full-page (delta=+0.000).
+
+--------------------------------------------------------------------------
+[TURN 14 — AI]
+--------------------------------------------------------------------------
+Read the numbers precisely rather than the printed verdict string: both
+sides read 0.184, so "pipeline wins" was a tie mislabeled by the notebook's
+own tie-breaking default, not a real win — because layout.mode=whole_page
+makes the "pipeline" path whole-page too. The real result is the second
+block: in-pipeline whole-page now equals raw full-page exactly, closing the
+loop opened when Turn 6/13's era first flagged the region-vs-full-page
+question. Flagged the one number still open: 0.184 vs the 0.15 target from
+A1 — a layout/parsing question, not something this fix was meant to close.
+
+--------------------------------------------------------------------------
+[TURN 15 — ME]
+--------------------------------------------------------------------------
+So my friend who is generating the kb with the previous layout.py and
+ocr.py, what do I say to them? Also: do these changes go against our task
+definitions and rules?
+
+--------------------------------------------------------------------------
+[TURN 15 — AI]
+--------------------------------------------------------------------------
+Built side-by-side per-page CER tables (old block-pipeline vs whole-page-
+with-buggy-TSV vs final-fixed) so the teammate could see exactly which
+pages each of the two independent bugs corrupted, rather than just being
+told "pull latest." On the rules question: checked STRUCTURE.md directly —
+config.yaml edits and function-body edits inside layout.py/ocr.py are
+explicitly allowed; the stage order in pipeline.py, tool signatures, and
+data contracts were never touched, so tests/test_structure.py and
+test_contracts.py still pass. The one real obligation flagged: the
+layout-strategy pivot (block segmentation, planned in A1, to whole-page)
+needed writing into configs/design_choices.md so A1 and A2 stay consistent
+— evolving a design under evidence is fine, silently diverging is not.
+
+--------------------------------------------------------------------------
+[TURN 16 — ME]
+--------------------------------------------------------------------------
+Can you check the whole submission requirement for A2 and make a
+requirement checklist of everything we are yet to do.
+
+--------------------------------------------------------------------------
+[TURN 16 — AI]
+--------------------------------------------------------------------------
+Extracted the actual graded rubric text directly out of forms/A2_form.docx
+(python-docx, not the generic walkthrough PDF) so the checklist matched
+exactly what would be graded, then checked every required path against its
+real on-disk state. Two blockers surfaced: transcripts/*.txt for A2 did not
+exist yet (the authorship gate), and neither kb_demo.ipynb nor eda.ipynb
+had ever been executed — zero saved outputs anywhere, so every number
+anyone might write in the form would currently be ungrounded.
+
+--------------------------------------------------------------------------
+[TURN 17 — ME]
+--------------------------------------------------------------------------
+draft design_choices.md and pipeline_diagram.md
+
+--------------------------------------------------------------------------
+[TURN 17 — AI]
+--------------------------------------------------------------------------
+Filled Stages 1-4 of the eight-facet table using only what had actually
+been measured that session (passthrough-vs-classical CER, the block-vs-
+whole-page A/B, the two OCR bugs), and wrote a Mermaid pipeline diagram
+matching pipeline.py's real stage order. Deliberately left the Index-stage
+chunk-count cell as an explicit [TODO] rather than a plausible-looking
+number, since no full-corpus build had been run yet — a fabricated number
+would score zero under the form's own grounding gate.
+
+--------------------------------------------------------------------------
+[TURN 18 — ME]
+--------------------------------------------------------------------------
+[Shared teammates' executed notebooks: kb_demo.ipynb, then eda.ipynb, then
+the actual Kaggle build notebook that produced the shipped index.]
+
+--------------------------------------------------------------------------
+[TURN 18 — AI]
+--------------------------------------------------------------------------
+kb_demo's retrieval example was genuinely correct (query "veratrum album
+dosage for cholera" -> bk1_p076, matching our own A1 worked example almost
+verbatim) — but the retrieved chunk text itself contained garbage:
+"[remedy:arsenic [remedy:arsenicum_album]um_album]". Root-caused it in
+chunk.py: the marker text for a remedy contains that remedy's own shorter
+alias as a literal substring, so scanning progressively-edited text let a
+later variant match inside a marker an earlier variant had just inserted.
+Fixed by computing every marker-insertion position against the pristine
+text once, then splicing right-to-left, so a marker's own text can never be
+re-scanned — verified against the exact corrupted strings before calling
+it fixed. Separately, eda.ipynb turned out to have its own standalone
+QUOTE_NONE bug — its word-count/script-mix/height functions never call the
+shared pipeline code at all, so the earlier ocr.py/layout.py fix never
+reached it; fixed and consolidated its three redundant full-corpus Tesseract
+passes into one cached pass along the way. Then traced provenance: the
+build notebook's log line "Detecting layout (whole-page)" only exists in
+the code after the whole-page fix, which is direct proof (not inference)
+that fix reached the shipped 2,054-chunk index — the marker bug did not,
+since it was written after that build already ran.
+
+--------------------------------------------------------------------------
+[TURN 19 — ME]
+--------------------------------------------------------------------------
+[Opened forms/A2_form.docx in the IDE.] Can you merge fix the changes from
+latest pull.
+
+--------------------------------------------------------------------------
+[TURN 19 — AI]
+--------------------------------------------------------------------------
+git status showed "both modified" on the binary .docx after a teammate's
+independent push. Rather than blindly picking a side, diffed every table
+cell between both conflict stages first — and found "theirs" wasn't a real
+alternative version, it was a structurally corrupted copy (columns and
+rows shifted, cascading from one missing row) with no content that wasn't
+already mine, just re-typed into broken tables. Confirmed the working file
+on disk was already damaged (14 tables instead of the original 16, erroring
+mid-Section-5) before touching anything further. Fixed it by pulling the
+original blank template from the first commit and reapplying every fill
+from the session in one clean, verified pass (14 automated checks against
+the rebuilt file) rather than trying to salvage either broken side.
+
+--------------------------------------------------------------------------
+[TURN 20 — ME]
+--------------------------------------------------------------------------
+Was eda notebook supposed to be run on both books or only book 2? ... yes
+please [add a bk1 page/word-count section] ... although it would be run on
+the old version, we don't have time to run the new one now.
+
+--------------------------------------------------------------------------
+[TURN 20 — AI]
+--------------------------------------------------------------------------
+Distinguished a real requirement from an inferred convention: nothing in
+the spec mandates train-only EDA, but grading_kit/manifest.yaml's
+corpus.words was silently representing bk2 alone, not the true corpus
+total. Added a deliberately narrow bk1 section (page/word counts only, no
+script-mix or quality analysis, to avoid over-exploring the held-out set)
+that reuses the already-fixed caching helper. While adding it, caught that
+my own earlier QUOTE_NONE fix had accidentally dropped a `from tqdm import
+tqdm` line that later cells depend on — would have crashed a fresh run
+with NameError; fixed before it ever got run.
+
+--------------------------------------------------------------------------
+[TURN 21 — ME]
+--------------------------------------------------------------------------
+Can you check the transcript of 2105016 (which is me) and fix the
+inconsistencies and also add anything that is missing.
+
+--------------------------------------------------------------------------
+[TURN 21 — AI]
+--------------------------------------------------------------------------
+Verified every checkable claim in this transcript against the repo before
+changing anything: all ten cited commit hashes exist and match their
+quoted messages, requirements.lock is exactly the claimed 414 lines,
+uv.lock is tracked in the exact commit cited. Added the one genuinely
+missing required field ("Sections led," present in the spec but absent
+from the header). Flagged, but did not unilaterally rewrite, two judgment
+calls: the "condensed reconstruction" disclosure (a real but team-wide
+pattern, not unique to this file) and the blank "Worked sections" column in
+A2_form.docx (a shared team declaration, not mine to fill for everyone).
+When asked whether the original chat behind this reconstruction could be
+recovered instead of relying on a summary, checked local Claude Code
+session storage rather than assuming it was gone — found the actual
+source session, confirmed by a near-verbatim string match against this
+document's own Turn 2 text, and reported that finding honestly instead of
+recommending the disclosure simply be deleted.
+
+
+==========================================================================
+REFLECTION
+==========================================================================
+What I accepted, changed, or rejected from the AI, and why:
+
+1. Rejected letting Qwen's raw output stand as our held-out ground truth
+   once it was explained that an LLM/VLM transcribing its own eval set is
+   circular — it can make your CER look falsely good (if it errs the same
+   way your OCR does) or falsely bad, either way not measuring anything
+   real. Asked for a human-proofing workflow instead of a re-transcription
+   script.
+
+2. Rejected the AI's own offer to "fix" the labels by reading the scanned
+   images itself (Turn 5) for the same reason as #1 — it's another
+   unverified model, not an oracle. Accepted the narrower, honest offer
+   instead: flag mechanical artifacts it could be confident about, and
+   build tooling that makes the human's job fast rather than replace the
+   human.
+
+3. Changed the OCR strategy from assumption to measurement. The pipeline
+   started with region/block OCR; instead of trusting either "regions
+   should help" or "full-page is simpler," pushed for an actual A/B
+   comparison (Turn 8's notebook cell 7b) on the real held-out set before
+   deciding anything.
+
+4. Kept asking "what exactly are we supposed to do more" (Turns 2, 9)
+   until the answer was a concrete, ordered checklist rather than a
+   restatement of concepts — the deadline didn't leave room for vague
+   next steps.
+
+5. Did not accept the first Dockerfile patch as sufficient. Kept pushing
+   ("what am I supposed to do now") until every reproducibility gap was
+   actually closed — Tesseract missing, pillow/tqdm undeclared, empty
+   lockfile, doc_agent unimportable under src/ — because a fix that
+   silently leaves one gap still means the grader can't run the pipeline.
+
+6. Accepted keeping the pipeline.py timing edit only after verifying, by
+   reading the actual test file rather than trusting a description of it,
+   that the structure-lock test is symbol-existence-only. That's a
+   deliberate, evidence-based acceptance of a minor "don't edit FIXED
+   files" rule-bend, not a default one.
+
+7. Pushed back on an inconsistency between the Codebase Guide's
+   "fine-tune a pretrained OCR model (baseline)" framing and the A2
+   form's own definition of "reproduce" (= run an existing trained
+   model). Made the AI reconcile the two explicitly rather than accept
+   the first, more confident-sounding answer — and the honest conclusion
+   was that the documents genuinely disagree, which is worth a real TA
+   question rather than a guess on a 20-point section.
+
+8. Used the "the grader re-runs your own code" argument to reorder
+   priorities: fixed the Dockerfile/lockfile/dependency gaps (which
+   determine whether the grader can measure anything at all) ahead of
+   chasing a better CER number, since a great number nobody can reproduce
+   is worth zero.
+
+9. When told the background structure-lock test had "failed" (exit 143),
+   checked what that exit code actually meant (SIGTERM, i.e. killed by a
+   timeout during heavy dependency imports) instead of reporting a
+   failure that hadn't actually happened, or silently assuming success.
+
+10. Remaining work I'm handing off honestly (as of Part 1): the full
+    held-out set still needs every label proofed by a human against its
+    scan (not just the two mechanical artifacts caught above); the
+    region-vs-full-page OCR decision needs to be applied in code once
+    cell 7b's numbers are in; requirements.lock/uv.lock need committing;
+    and the A2 form's own "Worked sections" column was still blank at the
+    time of this transcript, so this document is my own account of what I
+    actually drove, not a substitute for the team recording it in the
+    form.
+
+11. (Part 2) Did not accept the notebook's own printed "pipeline wins"
+    verdict at face value (Turn 14) — read the actual numbers behind it
+    and caught that it was a tied result mislabeled by a default
+    tie-break, not a genuine win. Reading past a summary string to the
+    underlying data was the same habit that later caught the marker-
+    corruption bug directly in real retrieval output rather than trusting
+    that "the retrieval example worked" meant everything downstream of it
+    was clean.
+
+12. Pushed on "do these changes go against our task definitions and
+    rules" (Turn 15) instead of assuming a design change was fine because
+    it improved a number. Wanted the actual STRUCTURE.md text checked
+    against what was changed, not a reassurance — accepted the answer
+    only once it cited the specific gate (config/body edits allowed,
+    stage order/contracts untouched) rather than a general "should be
+    fine."
+
+13. Rejected trusting the generic project walkthrough as the grading
+    source of truth (Turn 16) once it was clear forms/A2_form.docx has
+    its own, more specific rubric text with different point values and
+    requirements — asked for the checklist to be built from the actual
+    form, not a paraphrase of the handbook.
+
+14. Refused to let configs/design_choices.md's Index-stage row carry an
+    invented chunk-count number (Turn 17) even though a plausible-sounding
+    figure would have made the document look more finished — an explicit
+    [TODO] was the honest choice given no full build had run yet, since
+    the form's own grounding gate treats an unsupported number as worse
+    than an acknowledged gap.
+
+15. When a teammate's real Kaggle output showed a correct retrieval result
+    (Turn 18), did not stop at "it worked" — inspected the actual returned
+    text and caught a data-corruption bug (the chunk.py marker collision)
+    that a results-only read would have missed entirely. A working demo
+    and clean underlying data turned out to be two different claims, and
+    only checking the first would have shipped garbage silently.
+
+16. On the A2_form.docx conflict (Turn 19): did not accept either git
+    conflict side as-is just because one came from a teammate's push.
+    Insisted on diffing every cell first, which is what revealed the
+    "conflict" was actually one side being structurally corrupted, not a
+    real disagreement in content — resolving it by picking a side instead
+    of verifying first would have either kept broken tables or silently
+    discarded real work.
+
+17. When asked whether a lost chat transcript could really not be
+    recovered (Part 2, transcript-review turn), did not take "I don't
+    have it anymore" as final without checking — searching local session
+    storage first, rather than either fabricating content to fill the gap
+    or defaulting to "nothing can be done," is the same evidence-over-
+    assumption habit as points 1-2 and 9 above, just applied to this
+    transcript itself rather than to the project.
+
+18. Remaining work as of Part 2: the 2,054-chunk index shipped before the
+    chunk.py marker fix and should be rebuilt; eda.ipynb's refreshed
+    word/script counts and the new bk1 totals cell still need an actual
+    re-run and committed output; the "Worked sections" column in
+    A2_form.docx is now filled for me but intentionally left blank for my
+    teammates to confirm themselves; and the team has not yet decided
+    whether to replace the "condensed reconstruction" transcripts with
+    closer-to-raw exports, given the underlying source sessions turned out
+    to still exist.
+
+==========================================================================
+END OF TRANSCRIPT
+==========================================================================
