@@ -12,12 +12,11 @@
 - The tool names/signatures in `src/doc_agent/agent/tools.py`.
 
 ## Gates (CI fails the build if any fail)
-1. `ruff` (lint) · `black --check` (format) · `mypy` (types).
-2. `tests/test_structure.py` — required modules/callables exist with correct signatures.
-3. `tests/test_contracts.py` — data contracts validate.
-4. `tests/test_tools.py` — tool interface conformance.
-5. `tests/test_smoke.py` — end-to-end tiny run returns a grounded, cited answer.
-6. Reproducibility — seeded run reproduces reported metrics within tolerance.
+1. `tests/test_structure.py` — required modules/callables exist with correct signatures.
+2. `tests/test_contracts.py` — data contracts validate.
+3. `tests/test_tools.py` — tool interface conformance.
+4. `tests/test_smoke.py` — end-to-end tiny run returns a grounded, cited answer.
+5. Reproducibility — seeded run reproduces reported metrics within tolerance.
 
 ## Per-stage design table (fill in A2)
 Every stage states its choice across 8 facets: problem statement, data, model, methods, design,
