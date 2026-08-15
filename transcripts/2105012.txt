@@ -3,10 +3,11 @@ A2: AI-CHAT TRANSCRIPT
 ================================================================
 Member:          Tamzeed Mahfuz
 Student number:  2105012
-Sections led:    Portable Tesseract setup,
-                 sandbox testing,
-                 demo notebooks,
-                 OCR finetuning,
+Sections led:    Portable Tesseract setup so that the repo runs in any user machine,
+                 fresh sandbox environment testing,
+                 pipeline run and knowledge base building,
+                 demo notebooks creation and testing,
+                 OCR finetuning
 AI assistant:    Claude (Anthropic), ChatGPT (OpenAI)
 Project:         BanglaHomeoRAG
 ================================================================
