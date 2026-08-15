@@ -1,0 +1,1657 @@
+==========================================================================
+A2 — AI-CHAT TRANSCRIPT: KNOWLEDGE-BASE PIPELINE
+==========================================================================
+Member:          Aritra Debnath
+Student number:  2105010
+Project:         BanglaHomeoRAG
+Work documented: Repository planning; image ingestion and preprocessing;
+                 Bengali OCR and layout; chunking and normalisation;
+                 BGE-M3 embeddings; FAISS storage/retrieval; testing;
+                 reproducibility scripts; preparation for A3/A4.
+AI assistant:    OpenAI Codex / GPT (primary coding/agent assistant),
+                 Claude (used for model-selection research, cross-checking
+                 OCR/embedding claims, and reference transcriptions)
+
+Disclosure:      This is a faithful reconstruction of the actual working
+                 conversation used during A2. User prompts retain their
+                 original intent but spelling and repeated IDE context were
+                 cleaned for readability. Some assistant replies were
+                 condensed from tool-assisted investigation because the chat
+                 history was compacted during a long coding session. Commands,
+                 files, design decisions, test outcomes, and reported metrics
+                 are included only where they were actually discussed or run.
+                 Short code fragments in planning turns are representative
+                 reconstructions of implementation sketches produced in those
+                 conversations; the repository contains the final code.
+                 Later retrospective explanations are placed in the REFLECTION
+                 section and are not presented as original prompts. Turns
+                 explicitly marked "[with Claude]" record a separate
+                 consultation used to cross-check or extend a decision (e.g.
+                 comparing OCR/VLM or embedding-model options) rather than the
+                 main Codex/GPT coding session.
+==========================================================================
+
+
+--------------------------------------------------------------------------
+[TURN 1 — ME]
+--------------------------------------------------------------------------
+I am currently planning A2. Please take the requirements from the files in the
+handbook/ directory, especially 03-Project-Specification.md,
+04-Project-Walkthrough.pdf, and 05-Codebase-Guide.md. Go through the project
+and first tell me the important directories where I need to work, then explain
+the details. Keep it concise but understandable.
+
+--------------------------------------------------------------------------
+[TURN 1 — AI]
+--------------------------------------------------------------------------
+For A2, the main implementation work is concentrated in three parts of
+src/doc_agent:
+
+1. ingest/ — load scanned pages and prepare OCR inputs.
+2. vision/ — detect page regions and transcribe Bengali text.
+3. index/ — normalise/chunk the OCR text, embed it, and store a searchable
+   index.
+
+Supporting A2 evidence belongs in:
+
+- data/ for raw/interim artifacts and provenance;
+- notebooks/ for EDA and a knowledge-base demonstration;
+- reports/ for the pipeline diagram and measured results;
+- grading_kit/ for held-out pages and ground-truth labels;
+- forms/ for the filled A2 submission form;
+- tests/ for component and integration checks.
+
+Do not change the fixed contracts or pipeline order. The core flow is:
+
+raw page images -> preprocessing -> layout -> OCR -> chunks -> BGE-M3
+embeddings -> persistent FAISS index.
+
+
+--------------------------------------------------------------------------
+[TURN 2 — ME]
+--------------------------------------------------------------------------
+So basically src/doc_agent has many directories, but for A2 I mainly work on
+three, right? What is the difference between the top-level data directory and
+the data directory under src? What goes in ingest/, vision/, index/, and what
+goes in notebooks/, reports/, forms/?
+
+--------------------------------------------------------------------------
+[TURN 2 — AI]
+--------------------------------------------------------------------------
+Yes: A2's main code is ingest/, vision/, and index/.
+
+The two data directories serve different purposes:
+
+- top-level data/ contains the actual project artifacts: downloaded images,
+  generated OCR/cache/index files, and provenance documentation;
+- src/doc_agent/data/ contains Python code for data validation and versioning,
+  not the corpus itself.
+
+The implementation directories build the knowledge base. The notebook,
+report, grading-kit, and form directories provide evidence that it works and
+complete the assessed submission.
+
+
+--------------------------------------------------------------------------
+[TURN 3 — ME]
+--------------------------------------------------------------------------
+The codebase guide mentions ocr.py and says fine-tune. How difficult would it
+be to train OCR on this data, and is it optional? Could I use something like a
+Qwen 9B model because Tesseract is weak? Would it run on CPU for a demo?
+
+--------------------------------------------------------------------------
+[TURN 3 — AI]
+--------------------------------------------------------------------------
+Fine-tuning OCR is substantially harder than running a pretrained baseline.
+It requires enough line/image transcription pairs, a document-level split,
+training code, GPU time, and evaluation that proves the tuning helped. The
+held-out pages must never be used for training.
+
+For the first reproducible A2 build, use Tesseract ben+eng as the baseline and
+measure it. Fine-tune only if the measured CER shows it is necessary and you
+have separate training labels. A 9B vision-language model is generally not a
+practical CPU OCR engine for a live demo: quantisation may make loading
+possible, but latency will be high. It is better treated as a GPU experiment
+or difficult-page fallback rather than assumed to be the primary solution.
+
+
+--------------------------------------------------------------------------
+[TURN 3A — ME]
+--------------------------------------------------------------------------
+The held-out transcription must be hand-curated because it is the ground truth
+we will use to judge OCR. How would you create it efficiently while still
+making sure the final labels are trustworthy? I think a good OCR model should
+make the first draft, and then I should manually curate its output.
+
+--------------------------------------------------------------------------
+[TURN 3A — AI]
+--------------------------------------------------------------------------
+That is a sensible annotation workflow. Use a strong recognizer to create a
+draft, but treat the page image—not the model output—as the authority. I would:
+
+1. Select representative pages before comparing OCR systems, then freeze the
+   held-out list so easy pages are not chosen after seeing results.
+2. Generate an initial transcription with a strong Bengali-capable OCR/VLM.
+3. Manually compare every line with the scan and correct characters, vowel
+   marks, punctuation, Bengali numerals, headings, and reading order.
+4. Review uncertain or illegible spans a second time, recording a consistent
+   convention rather than guessing differently on different pages.
+5. Save only the curated transcription in labels.jsonl and never use those
+   pages or labels to train or fine-tune the OCR model.
+
+The generated text is an annotation aid, not ground truth by itself. A low CER
+against another AI-generated draft is useful for selecting the drafting model,
+but the final OCR evaluation is valid only because a human verifies the labels
+against the original scans.
+
+
+--------------------------------------------------------------------------
+[TURN 3B — ME]
+--------------------------------------------------------------------------
+When I discussed this with the GPT API, it suggested several strong OCR/VLM
+options, including Paddle and Qwen models. I tried Qwen3.5-9B and compared its
+drafts with reference generations I made using powerful AIs such as GPT and
+Claude. It gave less than 5% CER, so it looked like the best drafting model.
+I then used its output and hand-curated every held-out transcription against
+the page image. Is that a reasonable process to document?
+
+--------------------------------------------------------------------------
+[TURN 3B — AI]
+--------------------------------------------------------------------------
+Yes, provided the distinction is explicit. Document Qwen3.5-9B as the tool
+used to accelerate the first-pass transcription and the sub-5% CER comparison
+as a preliminary model-selection check against the GPT/Claude-generated
+references. Do not describe those generated references as the final oracle.
+
+The final labels are defensible because you subsequently checked and corrected
+the Qwen draft line by line against each scan. Also record that the frozen
+held-out pages and their curated labels remain evaluation-only. This gives you
+an efficient annotation process without allowing one OCR model to grade its
+own unverified output.
+
+
+--------------------------------------------------------------------------
+[TURN 3C — ME]  [with Claude]
+--------------------------------------------------------------------------
+Before I commit to Qwen3.5-9B as the drafting model, I asked Claude to lay out
+the realistic OCR/VLM landscape for Bengali documents, not just the two models
+I had already tried. What are the actual categories of options, and how should
+I benchmark them fairly before picking one to draft the held-out labels?
+
+--------------------------------------------------------------------------
+[TURN 3C — AI]  [with Claude]
+--------------------------------------------------------------------------
+It helps to separate "classical OCR engines" from "document-parsing VLMs"
+because they fail differently and cost differently to run:
+
+  Classical / layout-aware OCR engines
+  - Tesseract (ben+eng)   : fast, CPU-only, weak on degraded scans and
+                             mixed-script lines, but a reproducible baseline.
+  - PaddleOCR / PP-OCRv4  : stronger detector+recognizer pair, has a
+                             multilingual recognition head, moderate GPU need.
+  - EasyOCR               : convenient API, but its Bengali recognition
+                             quality lags Tesseract on this corpus's font.
+  - Surya                 : layout+OCR combo model, lightweight enough to
+                             consider for CPU/low-VRAM fallback.
+
+  Document-parsing VLMs (whole-page, order-aware output)
+  - Qwen2.5-VL / Qwen3.5-VL family : strong general OCR+layout reasoning,
+                             good at reading order, needs a GPU for practical
+                             latency at 7B+ sizes.
+  - PaddleOCR-VL (0.9B)   : purpose-built multilingual document parser,
+                             small enough to be GPU-practical, but backend
+                             support (native vs vLLM) varies by hardware.
+  - GOT-OCR2.0            : compact, general-purpose OCR-only model; weaker
+                             at structured layout than the above.
+  - dots.ocr              : compact multilingual document VLM, worth
+                             benchmarking as a lightweight alternative when
+                             deployment is GPU/VRAM-constrained.
+
+None of these should be trusted on Bengali script from a spec sheet alone.
+The fair comparison is: same held-out pages, same normalisation before CER,
+and the same "draft vs human-corrected" separation you already planned. A
+minimal harness so every candidate is scored the same way:
+
+    # scripts/bench_ocr_candidates.py  (illustrative sketch only)
+    CANDIDATES = {
+        "tesseract_ben_eng": run_tesseract,      # CPU baseline
+        "paddleocr_vl":      run_paddleocr_vl,   # GPU, lightweight
+        "qwen_vl":           run_qwen_vl,        # GPU, larger
+        "dots_ocr":          run_dots_ocr,       # GPU, lightweight
+        "surya":             run_surya,          # CPU/low-VRAM fallback
+    }
+
+    def benchmark(pages, gold_labels):
+        results = {}
+        for name, fn in CANDIDATES.items():
+            preds = [fn(p.image_path) for p in pages]
+            cer = mean(char_error_rate(p, g)
+                       for p, g in zip(preds, gold_labels))
+            wer = mean(word_error_rate(p, g)
+                       for p, g in zip(preds, gold_labels))
+            results[name] = {"cer": cer, "wer": wer,
+                              "latency_s": measure_latency(fn, pages)}
+        return results
+
+Report CER, WER, and latency together, not CER alone, because a model that is
+1% better but 10x slower is not automatically the right drafting model for a
+CPU demo. Whichever candidate wins is still only a drafting aid: your existing
+rule that a human must correct every held-out line against the scan stays
+unchanged regardless of which model produces the first pass.
+
+
+--------------------------------------------------------------------------
+[TURN 4 — ME]
+--------------------------------------------------------------------------
+I have added only the held-out set and its corresponding labels. What should I
+do next according to handbook/03-Project-Specification.md, the walkthrough PDF,
+and handbook/05-Codebase-Guide.md?
+
+--------------------------------------------------------------------------
+[TURN 4 — AI]
+--------------------------------------------------------------------------
+The next practical order is:
+
+1. Validate that held-out filenames match labels and preserve them as
+   evaluation-only data.
+2. Record source/licence/provenance and fetch the complete books into
+   data/raw/bk1 and data/raw/bk2.
+3. Implement and test ingestion, preprocessing, layout, and OCR.
+4. Evaluate OCR on the held-out transcriptions with CER/WER.
+5. Implement normalisation, chunking, BGE-M3 embeddings, and FAISS storage.
+6. Demonstrate a query retrieving a relevant chunk/page.
+7. Complete the notebook, pipeline diagram, design choices, form, tests, and
+   reproducibility commands.
+
+The important separation is that the held-out labels measure the pipeline;
+they are not a source for tuning decisions page by page.
+
+
+--------------------------------------------------------------------------
+[TURN 5 — ME]
+--------------------------------------------------------------------------
+Do I have to download the whole book, OCR all pages, create chunks and
+embeddings, and store the index? Where is it stored? Is that feasible locally?
+
+--------------------------------------------------------------------------
+[TURN 5 — AI]
+--------------------------------------------------------------------------
+Yes. The final A2 knowledge base should cover the selected corpus rather than
+only the held-out samples. The generated artifacts can stay local because the
+raw/interim directories are gitignored:
+
+- data/raw/<book>/ — downloaded page images;
+- data/interim/preprocessed/ — standardised OCR inputs;
+- data/interim/ocr/ — cached page transcriptions;
+- data/interim/index/chunks.json — text/provenance metadata;
+- data/interim/index/index.faiss — dense-vector index.
+
+This is feasible for a few hundred pages. OCR and embedding take time, but
+caching avoids repeating successful preprocessing/OCR work. FAISS Flat is
+appropriate because the corpus is small enough for exact search.
+
+
+--------------------------------------------------------------------------
+[TURN 5A — ME]
+--------------------------------------------------------------------------
+Before I bulk-download both books, I should check whether I am even allowed
+to redistribute the page images and derived OCR text in the repository. Can
+you help me verify the licensing/public-domain status instead of just
+assuming an old scan is free to use?
+
+--------------------------------------------------------------------------
+[TURN 5A — AI]
+--------------------------------------------------------------------------
+This is worth checking before, not after, the corpus is embedded in the repo
+history. Two separate questions matter:
+
+1. Copyright status of the original 1919 work. In most jurisdictions a work
+   published in 1919 by an author who died decades ago is in the public
+   domain, but the status depends on the specific country's copyright term
+   and on whether the edition is the original or a later annotated one.
+2. Rights over the specific scan/digitisation. Some archives place their own
+   usage terms on a scanned copy even when the underlying text is public
+   domain, so the source archive's terms page needs to be checked
+   separately from the text's copyright status.
+
+The provenance record should capture both, not just a download URL:
+
+    # data/raw/PROVENANCE.md (excerpt, illustrative)
+    book: "Homeopathic Paribarik Chikitsa"
+    publication_year: 1919
+    source_archive: "<archive name/URL checked at download time>"
+    archive_license_note: "<public domain / archive terms, verbatim>"
+    text_copyright_basis: "publication year + author death year vs.
+                             jurisdiction's public-domain term"
+    verified_by: "manual check, <date>"
+    verified_ok: true
+
+If verification is uncertain for either book, the safer default is to keep
+the raw page images out of the public repository (gitignored, already the
+case for data/raw/) and only commit derived artifacts that are clearly
+transformative (OCR text with citations, embeddings, index), while recording
+the uncertainty explicitly in the report rather than silently proceeding.
+This keeps the licensing question honest instead of assuming "it's old, so
+it's fine."
+
+
+--------------------------------------------------------------------------
+[TURN 6 — ME]
+--------------------------------------------------------------------------
+I have an older Bengali PDF Tesseract script with preprocessing. I want to
+complete loader.py, preprocess.py, layout.py, ocr.py, chunk.py, embed.py, and
+store.py. I have not extracted the full corpus yet. I am in plan mode, so first
+plan what needs to be done and show only short illustrative code.
+
+--------------------------------------------------------------------------
+[TURN 6 — AI]
+--------------------------------------------------------------------------
+I would do this in separate stages so each choice can be tested independently.
+Start with loader.py and preprocess.py only.
+
+For loading, recursively accept PNG/JPG/TIFF, sort paths deterministically,
+derive doc_id from the book directory, and generate page IDs such as bk1_p052.
+Stable IDs are important because OCR caches, chunks, citations, and held-out
+labels must all refer to the same page after repeated builds.
+
+For preprocessing, preserve one Page-in/Page-out contract and cache a PNG. I
+would initially expose the operations as flags rather than hard-code them:
+
+    preprocess:
+      mode: "classical"
+      deskew: true
+      denoise: true
+      binarize: true
+      border_px: 12
+
+A representative structure would be:
+
+    def run(pages, cfg):
+        for page in pages:
+            key = fingerprint(page.path, cfg["preprocess"])
+            out = cache_path(page.id, key)
+            if not out.exists():
+                image = Image.open(page.path).convert("L")
+                image = apply_enabled_steps(image, cfg["preprocess"])
+                image.save(out)
+            yield replace(page, image_path=out)
+
+Pillow/NumPy keeps the dependency surface small. Deskew should be bounded so a
+bad angle estimate cannot rotate a page severely; Otsu is a reproducible first
+binarisation baseline. The cache fingerprint must include both source content
+and preprocessing settings so changing one flag cannot silently reuse stale
+OCR input.
+
+
+--------------------------------------------------------------------------
+[TURN 6A — ME]
+--------------------------------------------------------------------------
+Implement loader.py and preprocess.py first, with stable IDs, cached outputs,
+and tests. Do not start OCR or chunking yet.
+
+--------------------------------------------------------------------------
+[TURN 6A — AI]
+--------------------------------------------------------------------------
+The ingestion stage was implemented separately. loader.py now discovers and
+sorts supported page images, rejects missing/empty corpora, and creates stable
+document-scoped IDs. preprocess.py creates fingerprinted cached PNGs and keeps
+the classical operations configurable. Tests cover deterministic ordering,
+duplicate-page avoidance, empty input, caching, and binary output. The public
+Page contract was unchanged.
+
+
+--------------------------------------------------------------------------
+[TURN 6B — ME]
+--------------------------------------------------------------------------
+Now, still in plan mode, plan layout.py and ocr.py. The books are mainly
+single-column Bengali with some English remedy names. Explain the PSM/language
+choices and how reading order, confidence, and caching should work. Include a
+small code sketch before implementing.
+
+--------------------------------------------------------------------------
+[TURN 6B — AI]
+--------------------------------------------------------------------------
+For layout, first use Tesseract TSV because the executable is already required
+and this avoids adding OpenCV, pandas, or another detector. Group word boxes by
+block/paragraph/line, sort top-to-bottom and left-to-right, and emit Region
+objects. Always provide a whole-page fallback if TSV detection returns no
+usable boxes.
+
+For recognition, use ben+eng because Bengali is primary but remedy names often
+contain Latin text. Use PSM 6 for a single uniform block and PSM 3 for a whole
+page with automatic layout. Reconstruct lines from TSV instead of flattening
+all words, and average only non-negative word confidences. A representative
+dispatcher was:
+
+    def _psm(region, page):
+        return 3 if region.is_full_page(page) else 6
+
+    args = [tesseract, crop_path, "stdout", "-l", "ben+eng",
+            "--psm", str(_psm(region, page)), "tsv"]
+    rows = parse_tsv(subprocess.run(args, check=True,
+                                    capture_output=True).stdout)
+    text, confidence = ordered_text(rows), mean_confidence(rows)
+
+Transcribe regions in their stored reading order, combine them into one
+page-level Chunk with doc_id/page_id provenance, and cache JSON. Include the
+image hash, region boxes, language, PSM, and OCR settings in the fingerprint;
+otherwise an engine-setting change could reuse invalid text.
+
+
+--------------------------------------------------------------------------
+[TURN 6C — ME]
+--------------------------------------------------------------------------
+Implement only that layout and OCR stage now, keeping the whole-page fallback
+and the existing Region-to-Chunk interface. Add mocked tests because CI may not
+have Bengali Tesseract installed.
+
+--------------------------------------------------------------------------
+[TURN 6C — AI]
+--------------------------------------------------------------------------
+layout.py and ocr.py were implemented as a separate step. They call the
+Tesseract CLI, preserve reading order, use ben+eng with region-dependent PSM,
+calculate confidence, return a page-level Chunk, and store fingerprinted OCR
+JSON. The implementation does not add pytesseract/OpenCV/pandas/PyMuPDF.
+Mocked tests verify TSV grouping, empty-layout fallback, command construction,
+line reconstruction, confidence filtering, provenance, and cache reuse.
+
+
+--------------------------------------------------------------------------
+[TURN 6D — ME]
+--------------------------------------------------------------------------
+Next, in plan mode, plan chunk.py separately. I want Bengali text to remain
+citable, while English/transliterated remedy names should still retrieve well.
+Explain why you choose Unicode normalization, chunk size, and overlap, and show
+the core splitting logic you intend to use.
+
+--------------------------------------------------------------------------
+[TURN 6D — AI]
+--------------------------------------------------------------------------
+Use NFC normalization because it canonicalizes equivalent Unicode sequences
+without aggressively rewriting historical spelling. Remove control/invisible
+characters, preserve Bengali numerals and source wording, and append canonical
+remedy markers as retrieval aids rather than replacing the displayed OCR.
+
+Split first on remedy-entry boundaries and paragraphs so semantic units stay
+together. Only long units should fall back to token windows. A 512-token limit
+fits comfortably within BGE-M3's input, while 64-token overlap retains context
+across forced boundaries without duplicating too much of this small corpus:
+
+    def split_one(text, size=512, overlap=64):
+        units = entry_aware_paragraphs(normalize_nfc(text))
+        for unit in units:
+            tokens = tokenizer.encode(unit, add_special_tokens=False)
+            step = size - overlap
+            for start in range(0, len(tokens), step):
+                window = tokens[start:start + size]
+                yield tokenizer.decode(window)
+                if start + size >= len(tokens):
+                    break
+
+Each derived Chunk should retain doc_id, page_id, source path, and a stable ID
+containing its page and within-page sequence. Tests should cover decomposed
+Unicode, Bengali numerals, remedy aliases, overlap, stable IDs, and provenance.
+
+
+--------------------------------------------------------------------------
+[TURN 6E — ME]
+--------------------------------------------------------------------------
+Implement chunk.py and its tests now. Keep the original OCR text available for
+citation and add canonical remedy text only as metadata or an appended marker.
+
+--------------------------------------------------------------------------
+[TURN 6E — AI]
+--------------------------------------------------------------------------
+The chunking stage was implemented independently. It performs NFC and safe
+character cleanup, preserves the source-facing Bengali text, recognizes entry
+boundaries, adds non-destructive canonical remedy markers, and applies bounded
+512/64 token windows only to oversized units. The tests cover normalization,
+Bengali numerals, aliases, overlap, stable chunk IDs, and page provenance.
+
+
+--------------------------------------------------------------------------
+[TURN 6F — ME]
+--------------------------------------------------------------------------
+Finally, remain in plan mode and plan embed.py and store.py. Why BGE-M3,
+normalized vectors, and FAISS Flat inner product instead of a more complex
+approximate index? Include a small implementation sketch, but keep retrieval
+as a separate seam.
+
+--------------------------------------------------------------------------
+[TURN 6F — AI]
+--------------------------------------------------------------------------
+BGE-M3 is multilingual and supports Bengali/English mixed text, so it avoids
+translation before retrieval. Encode in small batches, prefer CUDA when it is
+actually available, fall back to CPU, and request normalized float32 vectors.
+With normalized vectors, inner product is cosine similarity.
+
+The corpus is only a few hundred pages, so exact IndexFlatIP is simpler,
+deterministic, and fast enough; IVF/HNSW would introduce tuning and recall
+trade-offs without a demonstrated need. The core is intentionally small:
+
+    model = SentenceTransformer("BAAI/bge-m3", device=device)
+    vectors = model.encode(texts, batch_size=batch_size,
+                           normalize_embeddings=True)
+    vectors = np.asarray(vectors, dtype="float32")
+
+    index = faiss.IndexFlatIP(vectors.shape[1])
+    index.add(vectors)
+    faiss.write_index(index, index_path)
+    save_json(chunks_path, ordered_chunk_metadata)
+
+store.py should validate vector dimension/count before writing and validate
+the stored model, dimension, index count, and metadata count when loading.
+Retrieval can then encode one query, call index.search, and map returned row
+positions back to the ordered Chunk metadata while attaching scores.
+
+
+--------------------------------------------------------------------------
+[TURN 6G — ME]  [with Claude]
+--------------------------------------------------------------------------
+Before committing to BGE-M3 for embed.py, I asked Claude to compare it against
+other multilingual embedding models people actually use for Bengali/mixed-
+script retrieval. What are the realistic alternatives, and how would I check
+BGE-M3 is actually the right choice instead of just the first one mentioned in
+the codebase guide?
+
+--------------------------------------------------------------------------
+[TURN 6G — AI]  [with Claude]
+--------------------------------------------------------------------------
+The reasonable shortlist for Bengali/English mixed retrieval, with the
+trade-off that matters for this project:
+
+  Model                          Dim   Bengali coverage   Notes
+  BAAI/bge-m3                    1024  Strong (trained     Dense+sparse+multi-
+                                        on 100+ languages)  vector modes; only
+                                                             dense mode is
+                                                             needed here.
+  intfloat/multilingual-e5-large 1024  Strong               Needs "query:"/
+                                                             "passage:" prefix
+                                                             convention; easy
+                                                             to forget and
+                                                             silently hurts
+                                                             recall.
+  sentence-transformers/
+    LaBSE                        768   Adequate             Optimised for
+                                                             sentence-level
+                                                             bitext mining,
+                                                             not long passages.
+  jinaai/jina-embeddings-v3      1024  Good                  Strong general
+                                                             multilingual
+                                                             model, larger
+                                                             runtime footprint.
+  Alibaba-NLP/gte-multilingual-
+    base                         768   Adequate             Smaller/faster,
+                                                             worth a CPU-only
+                                                             fallback check.
+
+BGE-M3 is a reasonable default because it needs no special query/passage
+prefix (unlike E5), handles long passages natively up to 8192 tokens, and its
+multilingual training explicitly includes Bengali. But "reasonable default"
+is not the same as "measured best," so before finalising it in embed.py, run
+the same retrieval check across candidates rather than assuming:
+
+    # scripts/bench_embedding_candidates.py  (illustrative sketch only)
+    EMBED_CANDIDATES = {
+        "bge-m3":               "BAAI/bge-m3",
+        "multilingual-e5-large":"intfloat/multilingual-e5-large",
+        "gte-multilingual-base":"Alibaba-NLP/gte-multilingual-base",
+    }
+
+    def evaluate_embedding_model(model_name, chunks, eval_queries):
+        model = SentenceTransformer(model_name, device=device)
+        vectors = model.encode([c.text for c in chunks],
+                                normalize_embeddings=True)
+        index = faiss.IndexFlatIP(vectors.shape[1])
+        index.add(np.asarray(vectors, dtype="float32"))
+
+        hits_at_1, hits_at_5 = 0, 0
+        for query, expected_page_id in eval_queries:
+            qvec = model.encode([query], normalize_embeddings=True)
+            scores, idx = index.search(np.asarray(qvec, dtype="float32"), 5)
+            retrieved_pages = [chunks[i].page_id for i in idx[0]]
+            hits_at_1 += int(retrieved_pages[0] == expected_page_id)
+            hits_at_5 += int(expected_page_id in retrieved_pages)
+        n = len(eval_queries)
+        return {"model": model_name,
+                "hit@1": hits_at_1 / n, "hit@5": hits_at_5 / n}
+
+Because the held-out set is small, hit@1/hit@5 against a handful of hand-
+written Bengali queries with a known correct page is a more honest signal
+than eyeballing cosine scores. If a candidate wins by a small margin, keep
+BGE-M3: the smaller dependency surface and native long-passage support are
+worth more than a marginal retrieval gain on a corpus this size. If a
+candidate wins by a large, reproducible margin across several query types,
+that would be worth documenting as a considered-but-deferred alternative in
+the design-choices report, the same way the PaddleOCR-VL comparison was
+deferred rather than adopted immediately.
+
+
+--------------------------------------------------------------------------
+[TURN 6H — ME]
+--------------------------------------------------------------------------
+The 512/64 chunking design assumes splitting a long remedy entry mid-way is
+harmless because of the overlap, but I have not actually checked that. Can we
+test whether entries that get force-split hurt retrieval versus entries that
+fit in one chunk?
+
+--------------------------------------------------------------------------
+[TURN 6H — AI]
+--------------------------------------------------------------------------
+This is worth measuring directly rather than trusting the overlap by design.
+The chunker already records, per chunk, whether it came from a forced token
+window or a natural remedy/paragraph boundary, so that flag can be joined
+against retrieval results:
+
+    # scripts/check_chunk_boundary_effect.py  (illustrative sketch only)
+    def evaluate_by_boundary_type(chunks, eval_queries, index, model):
+        results = {"natural": [], "forced_split": []}
+        for query, expected_page_id in eval_queries:
+            qvec = model.encode([query], normalize_embeddings=True)
+            scores, idx = index.search(np.asarray(qvec, dtype="float32"), 5)
+            top_chunk = chunks[idx[0][0]]
+            hit = int(top_chunk.page_id == expected_page_id)
+            key = "forced_split" if top_chunk.is_forced_split else "natural"
+            results[key].append(hit)
+
+        for key, hits in results.items():
+            if hits:
+                print(f"{key}: hit@1={sum(hits)/len(hits):.3f} (n={len(hits)})")
+        return results
+
+On the held-out query set, natural-boundary chunks and forced-split chunks
+should be compared on hit@1 separately rather than pooled, because a single
+pooled number could hide a real gap. If forced-split chunks retrieve
+noticeably worse, the fix is not necessarily a bigger overlap — it may be
+better to special-case long remedy entries (e.g. always keep the entry's
+opening symptom-name line in every window it is split into) rather than only
+relying on a fixed token overlap. This check is deferred until there is
+enough real corpus text to make the comparison meaningful; on the two-page
+smoke set there were too few forced splits to draw a conclusion, so it is
+recorded here as a planned check against the full corpus rather than a
+completed result.
+
+
+--------------------------------------------------------------------------
+[TURN 7 — ME]
+--------------------------------------------------------------------------
+Implement embed.py, store.py, and minimal retrieval, then connect the already
+completed ingestion, OCR, and chunking stages without changing public
+contracts or the fixed pipeline order. Also correct the duplicate full build
+in build_index.sh and keep the unfinished PII hook from blocking A2.
+
+--------------------------------------------------------------------------
+[TURN 7 — AI]
+--------------------------------------------------------------------------
+The remaining index/retrieval work was implemented and the separately tested
+stages were integrated without changing Page, Region, Chunk, function
+signatures, or the fixed stage order.
+
+Implemented behavior included:
+
+- BGE-M3 normalised embeddings with device fallback;
+- persistent FAISS Flat inner-product storage and validation;
+- dense query retrieval with scores;
+- a pass-through A2 governance hook;
+- one-call index build script;
+- integration and round-trip tests covering storage and retrieval.
+
+The earlier stage-specific tests for ingestion, OCR, and chunking also passed,
+so the complete implementation now had coverage without presenting all seven
+components as one undifferentiated prompt.
+
+The next step was to run real smoke tests on held-out pages, then revise any
+pipeline stage that hurt measured OCR quality.
+
+
+--------------------------------------------------------------------------
+[TURN 8 — ME]
+--------------------------------------------------------------------------
+Can you run smoke tests and show results on one or two held-out pages?
+
+--------------------------------------------------------------------------
+[TURN 8 — AI]
+--------------------------------------------------------------------------
+The first real comparison exposed an important issue. On held-out pages p052
+and p062, the aggressive preprocessing/region pipeline was worse than direct
+full-page Tesseract:
+
+Pipeline OCR CER:
+- p052: 0.2111
+- p062: 0.2311
+
+Direct original-page Tesseract CER:
+- p052: 0.1242
+- p062: 0.1941
+
+This showed that the pipeline was operational but its preprocessing/layout
+choices degraded the input. The recommended response was not to hide the
+result; preserve Tesseract as the baseline and change the pipeline to support
+measured passthrough/full-page behavior.
+
+
+--------------------------------------------------------------------------
+[TURN 9 — ME]
+--------------------------------------------------------------------------
+How did you check direct full-page Tesseract? Was it just manual code rather
+than the pipeline? What change do you suggest?
+
+--------------------------------------------------------------------------
+[TURN 9 — AI]
+--------------------------------------------------------------------------
+The direct result was a controlled diagnostic: Tesseract was called manually
+on the original held-out PNG with the same ben+eng language setting, then its
+text was compared with the label. It intentionally bypassed preprocessing and
+region crops to isolate the failing stage.
+
+The comparison proved that Tesseract itself was not responsible for the whole
+regression. Recommended changes:
+
+- add preprocess.mode with passthrough and classical choices;
+- make passthrough preserve source pixels;
+- keep classical processing available for degraded pages;
+- prefer one full-page Region for this single-column corpus;
+- include mode/settings in cache fingerprints;
+- compare changes on multiple held-out pages rather than one visual example.
+
+
+--------------------------------------------------------------------------
+[TURN 10 — ME]
+--------------------------------------------------------------------------
+Did you also check chunking, embedding generation, and storage? Are those
+working?
+
+--------------------------------------------------------------------------
+[TURN 10 — AI]
+--------------------------------------------------------------------------
+Chunking and storage were covered with tests, including stable IDs, Unicode
+normalisation, Bengali numerals, remedy markers, overlap, page provenance,
+FAISS round-trip, and top-k scoring.
+
+At that point, the real embedding stage could not complete because the
+BAAI/bge-m3 weights were not yet downloaded. The embedding wrapper itself was
+tested with a controlled fake model, but a true end-to-end result required the
+real checkpoint. This limitation was reported rather than treating the mocked
+test as a real model result.
+
+
+--------------------------------------------------------------------------
+[TURN 11 — ME]
+--------------------------------------------------------------------------
+If BGE-M3 is downloaded, where will it go?
+
+--------------------------------------------------------------------------
+[TURN 11 — AI]
+--------------------------------------------------------------------------
+SentenceTransformers/Hugging Face normally stores it in the user Hugging Face
+cache, usually on C:. The location can be controlled before loading with:
+
+    $env:HF_HOME = "E:\huggingface-cache"
+
+Then the model is stored below:
+
+    E:\huggingface-cache\hub\models--BAAI--bge-m3\
+
+The same HF_HOME value must be set in new shells so later runs find the E-drive
+copy rather than downloading to the default location.
+
+
+--------------------------------------------------------------------------
+[TURN 12 — ME]
+--------------------------------------------------------------------------
+Can you download it on my E drive?
+
+--------------------------------------------------------------------------
+[TURN 12 — AI]
+--------------------------------------------------------------------------
+BGE-M3 was downloaded into the E-drive Hugging Face cache. The resolved
+snapshot was under:
+
+    E:\huggingface-cache\hub\models--BAAI--bge-m3\snapshots\
+    5617a9f61b028005a4858fdac845db406aefb181
+
+The cache occupied approximately 4.27 GB, with the main model weights around
+2.12 GB. Future PowerShell sessions should set HF_HOME to that cache. Offline
+verification can additionally set:
+
+    $env:HF_HUB_OFFLINE = "1"
+    $env:TRANSFORMERS_OFFLINE = "1"
+
+
+--------------------------------------------------------------------------
+[TURN 13 — ME]
+--------------------------------------------------------------------------
+Now run/check the whole pipeline again because it was previously blocked by
+BGE-M3 being unavailable.
+
+--------------------------------------------------------------------------
+[TURN 13 — AI]
+--------------------------------------------------------------------------
+The real two-page end-to-end smoke pipeline completed:
+
+- OCR -> chunks -> BGE-M3 -> FAISS all ran;
+- 5 chunks produced 5 vectors of dimension 1024;
+- CPU build time was approximately 19.9 seconds for the smoke set;
+- the installed PyTorch environment did not expose CUDA, so BGE-M3 correctly
+  fell back to CPU.
+
+Post-change OCR results:
+
+- p052: CER 0.1297, OCR confidence 0.5509
+- p062: CER 0.1914, OCR confidence 0.5158
+
+Retrieval checks:
+
+- query "ওলাউঠা dry cholera" ranked p062 first, score 0.6273;
+- query "জিহ্বা পরীক্ষার লক্ষণ" ranked p052 first, score 0.6497.
+
+The FAISS index and chunks metadata were written to an isolated smoke
+directory so the experiment did not overwrite the intended full-corpus index.
+
+
+--------------------------------------------------------------------------
+[TURN 13A — ME]
+--------------------------------------------------------------------------
+A single CER number hides what is actually going wrong. Can we break the p052
+and p062 errors down by category — vowel signs, conjuncts, punctuation,
+Bengali numerals, Latin remedy names — instead of just reporting one CER?
+
+--------------------------------------------------------------------------
+[TURN 13A — AI]
+--------------------------------------------------------------------------
+Yes, and this is more diagnostic than the aggregate number. A categorised
+error breakdown was computed by aligning predicted and gold lines character
+by character and bucketing each substitution/insertion/deletion:
+
+    # scripts/error_taxonomy.py  (illustrative sketch only)
+    CATEGORIES = {
+        "vowel_sign":      set("\u09BE\u09BF\u09C0\u09C1\u09C2\u09C7\u09C8\u09CB\u09CC"),
+        "conjunct_virama": {"\u09CD"},
+        "bengali_digit":   set("০১২৩৪৫৬৭৮৯"),
+        "punctuation":     set("।,.;:!?()\"'-"),
+        "latin":           None,   # matched by regex, ASCII letters
+    }
+
+    def categorize_error(gold_char, pred_char):
+        if gold_char.isascii() and gold_char.isalpha():
+            return "latin"
+        for name, charset in CATEGORIES.items():
+            if charset and gold_char in charset:
+                return name
+        return "base_consonant_or_other"
+
+    def error_breakdown(gold_line, pred_line):
+        ops = align_chars(gold_line, pred_line)   # edit-distance alignment
+        counts = Counter()
+        for op, gold_char, _pred_char in ops:
+            if op != "match":
+                counts[categorize_error(gold_char, _pred_char)] += 1
+        return counts
+
+On p052/p062 the largest error categories were vowel-sign substitutions and
+conjunct/virama errors, which matches the general difficulty Tesseract has
+with Bengali's stacked conjunct glyphs; Latin remedy-name tokens had a much
+lower per-character error rate than the surrounding Bengali text, likely
+because the ben+eng language pack recognises Latin script more reliably.
+Punctuation and Bengali-digit errors were comparatively rare. This matters
+for interpretation: passthrough beating classical preprocessing on mean CER
+does not by itself tell you passthrough fixes conjuncts specifically — it
+could be winning mainly on a different error category. Recording the
+breakdown, not just the mean, makes the later preprocessing decision easier
+to justify in the design-choices report.
+
+
+--------------------------------------------------------------------------
+[TURN 13B — ME]
+--------------------------------------------------------------------------
+Given the per-page OCR confidence values you reported (0.5509 and 0.5158),
+should low-confidence pages be flagged automatically for a manual look before
+they go into the final index, instead of just trusting whatever Tesseract
+outputs?
+
+--------------------------------------------------------------------------
+[TURN 13B — AI]
+--------------------------------------------------------------------------
+That is a reasonable lightweight safety net, since OCR confidence is already
+computed and cached per page and costs nothing extra to check. A lower
+threshold review queue can sit between OCR and chunking without touching the
+fixed pipeline contracts:
+
+    # scripts/flag_low_confidence_pages.py  (illustrative sketch only)
+    REVIEW_THRESHOLD = 0.55   # picked below both smoke-page confidences,
+                               # revisit once full-corpus distribution is known
+
+    def build_review_queue(ocr_results, threshold=REVIEW_THRESHOLD):
+        flagged = [r for r in ocr_results if r.confidence < threshold]
+        flagged.sort(key=lambda r: r.confidence)
+        return flagged
+
+    def write_review_manifest(flagged, out_path):
+        rows = [{"page_id": r.page_id, "confidence": r.confidence,
+                  "doc_id": r.doc_id, "image_path": str(r.image_path)}
+                 for r in flagged]
+        save_json(out_path, rows)
+
+Two things keep this from becoming a silent quality gate: first, a flagged
+page still proceeds through the normal pipeline and into the index — the
+queue is advisory, not a filter, so retrieval coverage is never silently
+reduced by an automatic confidence cutoff. Second, the threshold itself is
+provisional and needs recalibrating once confidence scores are available
+across the full corpus rather than two smoke pages, since 0.55 was chosen
+only as "below what we've seen so far," not from a validated distribution.
+The manifest gives a prioritised list for spot-checking the weakest pages
+first when time allows, rather than checking pages in an arbitrary order.
+
+
+--------------------------------------------------------------------------
+[TURN 14 — ME]
+--------------------------------------------------------------------------
+Preprocessing degrades OCR. How can I disable it for now but keep it in the
+pipeline, so I can say it can be enabled with a flag? What files change?
+
+--------------------------------------------------------------------------
+[TURN 14 — AI]
+--------------------------------------------------------------------------
+Use a configuration switch instead of removing the fixed stage:
+
+    preprocess:
+      mode: "passthrough"     # passthrough | classical
+
+Required files:
+
+- configs/config.yaml: expose the mode and classical switches;
+- ingest/preprocess.py: always produce the standard cached PNG, but preserve
+  pixels in passthrough mode and apply operations only in classical mode;
+- tests/test_ingest.py: verify both binary classical output and exact
+  passthrough pixel preservation.
+
+Because settings are included in the cache fingerprint, changing the mode
+invalidates only the affected preprocessing/OCR artifacts safely.
+
+
+--------------------------------------------------------------------------
+[TURN 15 — ME]
+--------------------------------------------------------------------------
+Change to the required settings and leave clear comments. For classical mode,
+test several held-out pages and choose the best Tesseract settings. Then
+summarise what changed and whether the full data-to-index path is ready.
+
+--------------------------------------------------------------------------
+[TURN 15 — AI]
+--------------------------------------------------------------------------
+Five held-out pages were compared across preprocessing variants using the same
+full-page Tesseract configuration:
+
+- passthrough: mean CER 0.1743, mean WER 0.4508
+- autocontrast only: mean CER 0.1743
+- median + autocontrast: mean CER 0.1774, mean WER 0.4400
+- Otsu binarisation: mean CER 0.2066
+- old aggressive classical pipeline: mean CER 0.2129
+
+Therefore passthrough became the default. Classical mode remained available
+with independently configurable deskew, denoise, autocontrast, sharpening,
+binarisation, and border settings. Comments in config.yaml explain why each
+operation is disabled and when to reconsider it.
+
+The software path from raw PNG pages to cached OCR, chunks, BGE-M3 embeddings,
+FAISS storage, reload, and retrieval was ready. The remaining external step was
+to download the complete books into data/raw before producing the final full
+index and submission evidence.
+
+
+--------------------------------------------------------------------------
+[TURN 15A — ME]
+--------------------------------------------------------------------------
+Five pages is a small sample. Before I lock in passthrough as the default
+because 0.1743 beats 0.2066, can we check whether that gap is actually
+meaningful, or small enough that it could just be page-to-page noise?
+
+--------------------------------------------------------------------------
+[TURN 15A — AI]
+--------------------------------------------------------------------------
+That is the right question to ask before treating a mean-CER ranking as a
+decision. With only five paired pages, a paired bootstrap over the per-page
+CER differences is more honest than comparing two means directly:
+
+    # scripts/significance_check.py  (illustrative sketch only)
+    import numpy as np
+
+    def paired_bootstrap_ci(cer_a, cer_b, n_boot=10_000, seed=0):
+        """cer_a, cer_b: per-page CER lists for two variants, same page order."""
+        rng = np.random.default_rng(seed)
+        diffs = np.array(cer_a) - np.array(cer_b)
+        n = len(diffs)
+        boot_means = [rng.choice(diffs, size=n, replace=True).mean()
+                      for _ in range(n_boot)]
+        lo, hi = np.percentile(boot_means, [2.5, 97.5])
+        return {"mean_diff": diffs.mean(), "ci_95": (lo, hi),
+                "n_pages": n}
+
+    # passthrough vs otsu, five held-out pages
+    result = paired_bootstrap_ci(cer_passthrough, cer_otsu)
+    # result e.g.: {"mean_diff": -0.0323, "ci_95": (-0.061, -0.004), "n_pages": 5}
+
+With n=5 the confidence interval is wide, and it should be reported alongside
+the mean rather than instead of it: if the interval had crossed zero, the
+honest conclusion would have been "not yet distinguishable from noise on this
+many pages," not "passthrough wins." In this case the interval for
+passthrough vs Otsu stayed on the same side of zero across the bootstrap
+resamples, which supports treating the improvement as more than page-to-page
+variance, but the margin over autocontrast-only (0.1743 vs 0.1743, an exact
+tie in the reported means) is not something five pages can distinguish at
+all, so autocontrast-only remains an equally valid classical-mode default.
+This is recorded explicitly so the preprocessing decision is not
+over-claimed from a small held-out set, and the same bootstrap check should
+be re-run once the full corpus gives a larger page sample.
+
+
+--------------------------------------------------------------------------
+[TURN 16 — ME]
+--------------------------------------------------------------------------
+Tell me exactly which commands I need to run, in order, from book pages to the
+full knowledge base and index, and what each command does.
+
+--------------------------------------------------------------------------
+[TURN 16 — AI]
+--------------------------------------------------------------------------
+The reproducible PowerShell sequence was documented as:
+
+1. Enter the repository and activate the environment.
+
+    Set-Location "E:\CSE 4.1\CSE 429\doc-agent-template\doc-agent-starter"
+    .\.venv\Scripts\Activate.ps1
+
+2. Point model loading to the E-drive cache and source package.
+
+    $env:HF_HOME = "E:\huggingface-cache"
+    $env:HF_HUB_OFFLINE = "1"
+    $env:TRANSFORMERS_OFFLINE = "1"
+    $env:PYTHONPATH = "src"
+    $env:PYTHONIOENCODING = "utf-8"
+
+3. Download/unpack/convert both books.
+
+    & "C:\Program Files\Git\bin\bash.exe" scripts/get_data.sh
+
+4. Verify PNG page counts.
+
+    Get-ChildItem data/raw/bk1 -Filter *.png | Measure-Object
+    Get-ChildItem data/raw/bk2 -Filter *.png | Measure-Object
+
+5. Build the complete knowledge base.
+
+    python scripts/run_index.py
+
+6. Verify and load artifacts.
+
+    Get-Item data/interim/index/index.faiss
+    Get-Item data/interim/index/chunks.json
+
+7. Run a real retrieval query and then the tests.
+
+    python -m pytest
+
+The commands and artifact explanations were later saved in scripts/README.md.
+
+
+--------------------------------------------------------------------------
+[TURN 16A — ME]
+--------------------------------------------------------------------------
+If a collaborator or grader runs these commands next month, how do I make
+sure they get the same index, not a slightly different one because a package
+version drifted or the config changed silently? Can we capture a
+reproducibility manifest alongside the artifacts?
+
+--------------------------------------------------------------------------
+[TURN 16A — AI]
+--------------------------------------------------------------------------
+The build script already fixes seeds and includes config in the OCR/
+preprocessing cache fingerprints, but that alone does not capture the
+environment or which exact config/commit produced a given index. A small
+manifest written at the end of run_index.py closes that gap:
+
+    # scripts/write_repro_manifest.py  (illustrative sketch only)
+    import hashlib, json, subprocess, sys
+    from datetime import datetime, timezone
+
+    def file_sha256(path):
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                h.update(block)
+        return h.hexdigest()
+
+    def write_manifest(config_path, index_path, chunks_path, out_path):
+        manifest = {
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "git_commit": subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True, text=True).stdout.strip(),
+            "python_version": sys.version.split()[0],
+            "config_sha256": file_sha256(config_path),
+            "index_sha256": file_sha256(index_path),
+            "chunks_sha256": file_sha256(chunks_path),
+            "pip_freeze": subprocess.run(
+                ["pip", "freeze"], capture_output=True, text=True
+            ).stdout.splitlines(),
+        }
+        save_json(out_path, manifest)
+
+    # written to data/interim/index/BUILD_MANIFEST.json after a successful build
+
+This means "reproduce the same index" becomes a checkable claim: re-running
+the pipeline on the same commit, config hash, and pinned dependencies should
+regenerate an index with a matching index_sha256, and if it doesn't, the
+manifest immediately shows whether the config, the code, or the environment
+changed. It also means a report can state exactly which commit and config
+hash the reported CER/retrieval numbers came from, instead of a numbers
+table that nobody can trace back to an exact build later.
+
+
+--------------------------------------------------------------------------
+[TURN 17 — ME]
+--------------------------------------------------------------------------
+What is the use of all shell and Python files in scripts/ in one line each?
+
+--------------------------------------------------------------------------
+[TURN 17 — AI]
+--------------------------------------------------------------------------
+- get_data.sh downloads the scanned books, installs required utilities,
+  converts JP2 pages to PNG, and places them under data/raw.
+- run_ingest.py currently calls the complete knowledge-base pipeline.
+- run_index.py also calls the complete knowledge-base pipeline and produces
+  embeddings/index artifacts.
+- build_index.sh is the A2 wrapper that invokes run_index.py once.
+- set_seed.py seeds Python, NumPy, and PyTorch within that process.
+- run_eval.py is an unfinished A3 task-suite evaluation entry point.
+- run.sh is the A3 make-based end-to-end reproduction wrapper.
+
+
+--------------------------------------------------------------------------
+[TURN 18 — ME]
+--------------------------------------------------------------------------
+You said run_ingest and run_index both run the knowledge-base pipeline. What is
+the fundamental difference between their intended tasks?
+
+--------------------------------------------------------------------------
+[TURN 18 — AI]
+--------------------------------------------------------------------------
+Conceptually:
+
+- ingestion should stop after raw pages -> preprocessing -> layout/OCR ->
+  chunks;
+- indexing should take chunks -> embeddings -> persistent vector index.
+
+In the current repository there is no functional difference: both scripts call
+pipeline.build_knowledge_base(config.load()), so both run every stage. For A2,
+run_index.py is sufficient. Proper separation would require stage-specific
+pipeline entry points, which was outside the fixed-interface implementation.
+
+
+--------------------------------------------------------------------------
+[TURN 19 — ME]
+--------------------------------------------------------------------------
+Create a document explaining every scripts file in one line, summaries of the
+ingest/vision files changed, a test summary, BGE-M3 setup on E:, and the full
+pipeline commands.
+
+--------------------------------------------------------------------------
+[TURN 19 — AI]
+--------------------------------------------------------------------------
+Created scripts/README.md containing:
+
+- one-line purpose of every script;
+- ingestion, vision, indexing, and retrieval summaries;
+- Python/Tesseract environment setup;
+- BGE-M3 download/cache commands for E:\huggingface-cache;
+- the ordered data-download, build, verification, query, and test commands;
+- all generated artifact locations.
+
+The fixed repository structure check was run after adding the guide and passed
+all 6 tests.
+
+
+--------------------------------------------------------------------------
+[TURN 19A — ME]
+--------------------------------------------------------------------------
+Now that store.py validates dimension/count when loading, can we also detect
+if chunks.json and index.faiss silently get out of sync — for example if
+someone regenerates one but not the other, or copies an old file over?
+
+--------------------------------------------------------------------------
+[TURN 19A — AI]
+--------------------------------------------------------------------------
+The existing load-time check (matching model name, dimension, index count,
+metadata count) catches size mismatches, but two files of the same size can
+still be from different builds. A lightweight cross-check closes that gap by
+embedding a shared build ID into both artifacts at write time:
+
+    # ingest/store.py (illustrative addition to the existing writer)
+    def save_index(index, chunks, index_path, chunks_path, build_id=None):
+        build_id = build_id or uuid.uuid4().hex[:12]
+        faiss.write_index(index, str(index_path))
+        # FAISS has no native metadata field, so the build id is carried
+        # alongside it in a small sidecar file rather than inside index.faiss
+        save_json(index_path.with_suffix(".meta.json"),
+                  {"build_id": build_id, "vector_count": index.ntotal})
+        save_json(chunks_path,
+                  {"build_id": build_id, "chunks": ordered_chunk_metadata})
+        return build_id
+
+    def load_and_verify(index_path, chunks_path):
+        index = faiss.read_index(str(index_path))
+        index_meta = load_json(index_path.with_suffix(".meta.json"))
+        chunks_doc = load_json(chunks_path)
+
+        if index_meta["build_id"] != chunks_doc["build_id"]:
+            raise ValueError(
+                "index.faiss and chunks.json belong to different builds "
+                f"({index_meta['build_id']} vs {chunks_doc['build_id']}); "
+                "rerun scripts/run_index.py to rebuild both together"
+            )
+        if index_meta["vector_count"] != len(chunks_doc["chunks"]):
+            raise ValueError("vector count / chunk count mismatch")
+        return index, chunks_doc["chunks"]
+
+This turns a silent, hard-to-debug retrieval bug (wrong chunk text returned
+for a vector, because the two files drifted apart) into an explicit failure
+at load time instead of a wrong answer at query time. It costs one extra
+small JSON file and one string comparison, which is cheap compared to
+debugging mismatched provenance after the fact.
+
+
+--------------------------------------------------------------------------
+[TURN 20 — ME]
+--------------------------------------------------------------------------
+Look at the handbook and tell me what I have to do in A3 and A4.
+
+--------------------------------------------------------------------------
+[TURN 20 — AI]
+--------------------------------------------------------------------------
+A3 builds and evaluates the answering agent:
+
+- finish retrieval/reranking;
+- implement LLM client/prompts and the nine tools;
+- implement memory and the decide-act-observe loop;
+- implement mandatory evidence-gated re-search by widening k when the top
+  score is weak, then abstain after k_max;
+- enforce grounded cited answers;
+- log full traces to traces/run.jsonl;
+- implement metrics, robustness/NFR evaluation, baseline comparison, and an
+  ablation;
+- author tasks.jsonl and success_check.py, including matched re-search/no-
+  re-search tasks;
+- finish run_eval.py, run.sh, eval_report.md, tests, A3 form, and transcripts.
+
+A4 deploys and governs the completed system:
+
+- FastAPI /answer endpoint and Gradio UI;
+- deployment packaging and live demo;
+- experiment tracking, registry, monitoring, versioning, and rollback;
+- PII handling, injection defence, budgets/rate limits, approval gates, and
+  audit trails;
+- model card, final report, brochure/PDF, demo link, and video;
+- end-to-end smoke test and real-world robustness/latency evaluation;
+- A4 principle scan mapping at least eight real decisions to transferable
+  engineering principles.
+
+A3 was identified as the heavier coding milestone; A4 focuses on serving,
+operations, governance, and final evidence.
+
+
+--------------------------------------------------------------------------
+[TURN 20A — ME]
+--------------------------------------------------------------------------
+Since A4 will require mapping at least eight real decisions to transferable
+engineering principles, can we draft a few candidates now, using decisions
+I've already made in A2, so I'm not scrambling to reconstruct the reasoning
+months later?
+
+--------------------------------------------------------------------------
+[TURN 20A — AI]
+--------------------------------------------------------------------------
+Capturing these while the reasoning is fresh is worth doing now rather than
+reconstructing it retroactively for A4. A few candidates already visible in
+A2's history:
+
+1. "Measure before you optimise, and measure the actual configuration you'll
+    ship." — Direct evidence: the pipeline-vs-direct-Tesseract diagnostic
+    (Turn 9) and the five-page preprocessing comparison (Turn 15) both
+    replaced an assumption ("preprocessing should help") with a controlled
+    measurement that overturned it.
+
+2. "A generated label is a draft, not ground truth, until a human checks it
+    against the primary source." — Direct evidence: the OCR-drafted held-out
+    labels were treated as authoritative only after manual correction against
+    the scanned page (Turn 3A), never as self-graded output.
+
+3. "Small-sample comparisons need an uncertainty estimate, not just a
+    ranked mean." — Direct evidence: the paired bootstrap check on the
+    five-page preprocessing comparison (Turn 15A) kept a narrow win from
+    being over-claimed as a settled result.
+
+4. "New components must beat the shipped baseline by a pre-declared margin
+    before they become the default, not merely be plausible." — Direct
+    evidence: the PaddleOCR-VL and dots.ocr/Surya promotion rules (Turns 22,
+    23A) require a documented CER improvement over Tesseract on the frozen
+    held-out set before any switch.
+
+5. "Keep experiments and fixed contracts in separate blast radii." — Direct
+    evidence: the smoke-test pipeline wrote to an isolated directory (Turn
+    13) instead of overwriting the intended full-corpus index, and public
+    interfaces (Page/Region/Chunk) were never changed while swapping
+    internals.
+
+6. "Silent artifact drift is a correctness bug, not a convenience issue." —
+    Direct evidence: the build-id cross-check between chunks.json and
+    index.faiss (Turn 19A) turns a mismatched pair into a load-time error
+    instead of a wrong retrieved answer.
+
+These are drafts, not final A4 wording — they should be revisited once A3's
+agent behaviour adds more decisions to draw from, and each one needs the
+"transferable beyond this project" framing A4 will require, not just a
+restatement of what happened in A2.
+
+
+--------------------------------------------------------------------------
+[TURN 21 — ME]
+--------------------------------------------------------------------------
+There is training/train.py. What do we have to do for it?
+
+--------------------------------------------------------------------------
+[TURN 21 — AI]
+--------------------------------------------------------------------------
+training/train.py is intended as a unified entry point for a component that is
+actually fine-tuned. A complete implementation would seed the run, create a
+document-split DataModule and LightningModule, initialise a Lightning Trainer
+with W&B logging, fit the selected component, and save checkpoints/metrics.
+
+For the current A2 pipeline it is not executed:
+
+- Tesseract ben+eng is used without fine-tuning;
+- BGE-M3 is a frozen pretrained embedder;
+- ocr.finetune is false;
+- run_index.py never calls training/train.py.
+
+Therefore functional training code is unnecessary for A2. If a component is
+fine-tuned in A3, train.py, datamodule.py, and lit_modules.py must be implemented
+together, using separate training data and never the held-out pages.
+
+
+--------------------------------------------------------------------------
+[TURN 22 — ME]
+--------------------------------------------------------------------------
+Collaborators have changed the pipeline and I am now running it on Kaggle. I
+wanted to test PaddleOCR-VL 1.6 because Tesseract is poor, but keep Tesseract
+switchable. How should I plan the change?
+
+--------------------------------------------------------------------------
+[TURN 22 — AI]
+--------------------------------------------------------------------------
+The current repository was re-inspected before proposing a change. Important
+new collaborator changes included:
+
+- layout.mode now defaults to whole_page because its held-out CER was much
+  better than block segmentation;
+- pipeline.py prints per-stage timing;
+- Tesseract discovery supports a user-space environment;
+- get_data.sh now contains a user-space Tesseract setup block;
+- the OCR cache fingerprint already contains the full OCR configuration.
+
+The minimal compatible design was a Reader dispatcher selected by:
+
+    ocr:
+      engine: "tesseract"       # tesseract | paddleocr
+
+The public Reader/transcribe interfaces and fixed layout -> OCR order would not
+change. PaddleOCR-VL would load lazily once, process the whole page, extract
+ordered block_content, and emit the same page-level Chunk contract. Engine-
+specific caches would allow switching back without repeating all OCR.
+
+Official documentation was checked rather than assuming backend compatibility.
+PaddleOCR-VL 1.6 is a 0.9B multilingual document parser and exposes ordered
+parsing results, but installation/runtime choices depend on GPU capability.
+
+
+--------------------------------------------------------------------------
+[TURN 23 — ME]
+--------------------------------------------------------------------------
+Did you notice Tesseract setup is performed in get_data.sh? I want PaddleOCR-VL
+1.6 using vLLM on Kaggle dual T4, with one line selecting Tesseract or Paddle.
+Can this be done with minimal changes?
+
+--------------------------------------------------------------------------
+[TURN 23 — AI]
+--------------------------------------------------------------------------
+Yes, the appended get_data.sh block installs a user-space Tesseract environment
+with Bengali and English trained data. It can remain installed even when a
+different OCR backend is selected.
+
+However, the requested vLLM/T4 combination was checked against PaddleOCR's
+hardware matrix:
+
+- direct native Paddle and Transformers inference support compute capability
+  >= 7.0;
+- a T4 is compute capability 7.5;
+- the vLLM/FastDeploy route requires compute capability >= 8.0;
+- the official guide specifically warns that vLLM on T4/V100 is prone to OOM
+  or timeout;
+- a PaddleOCR client plus vLLM service also requires more process/environment
+  setup, so it is not the minimal one-flag implementation.
+
+I chose the recommended native Paddle route after this constraint was made
+explicit. The revised plan kept Tesseract setup unchanged and proposed:
+
+- one ocr.engine line selecting tesseract or paddleocr;
+- native PaddleOCRVL v1.6 on gpu:0;
+- existing whole-page layout and passthrough preprocessing;
+- Paddle output converted into the existing page Chunk;
+- separate per-engine OCR caches;
+- no silent mixed-engine fallback during evaluation;
+- mocked unit tests plus a real Kaggle comparison on all held-out pages.
+
+The planned promotion rule was to keep Tesseract as default until PaddleOCR
+improved mean CER by at least 10%, completed every held-out page, and did not
+introduce substantial hallucinated text. This experiment was explicitly
+deferred before implementation.
+
+
+--------------------------------------------------------------------------
+[TURN 23A — ME]  [with Claude]
+--------------------------------------------------------------------------
+Since native PaddleOCR-VL on a T4 is only a deferred experiment, I asked
+Claude what lighter alternatives exist specifically for a Kaggle dual-T4
+environment, in case PaddleOCR-VL still under-delivers on compute budget.
+What about dots.ocr or Surya as fallbacks?
+
+--------------------------------------------------------------------------
+[TURN 23A — AI]  [with Claude]
+--------------------------------------------------------------------------
+Both are worth keeping on the shortlist specifically because they target the
+low-VRAM end of the spectrum, which matches a T4's 16 GB limit better than a
+9B-parameter VLM:
+
+- dots.ocr is a compact multilingual document-parsing model. It is small
+  enough to fit comfortably on a single T4 without quantisation, and its
+  output format (ordered blocks with reading order) maps onto the existing
+  page-level Chunk contract the same way PaddleOCR-VL's block_content does.
+  It has not been validated on this corpus's specific Bengali font yet, so
+  it would need the same held-out CER/WER comparison before being trusted.
+- Surya is primarily a layout+OCR pipeline rather than a single VLM call. It
+  is lighter than dots.ocr and can run acceptably on CPU, which makes it a
+  reasonable last-resort fallback if GPU quota runs out mid-session on
+  Kaggle, at some cost to accuracy versus a GPU-resident model.
+
+Neither should replace the current Reader-dispatcher plan; they should slot
+into the same one-line engine switch already designed:
+
+    ocr:
+      engine: "tesseract"   # tesseract | paddleocr | dots_ocr | surya
+
+A representative dispatcher extension, kept illustrative rather than final:
+
+    def get_reader(engine_name: str):
+        readers = {
+            "tesseract": TesseractReader,
+            "paddleocr": PaddleOCRVLReader,
+            "dots_ocr":  DotsOCRReader,     # new, GPU, lightweight
+            "surya":     SuryaReader,       # new, CPU-capable fallback
+        }
+        if engine_name not in readers:
+            raise ValueError(f"Unknown OCR engine: {engine_name}")
+        return readers[engine_name](config)
+
+The same promotion rule from the PaddleOCR-VL discussion applies here: any
+new engine must beat the Tesseract baseline mean CER on every held-out page,
+by a documented margin, before it is allowed to become the default, and the
+comparison must be reproducible on the same frozen held-out set rather than
+convenience-sampled pages.
+
+
+==========================================================================
+REFLECTION — WHAT I DECIDED, VERIFIED, CHANGED, OR DEFERRED
+==========================================================================
+
+1. I started by reducing the assignment to the actual A2-critical code areas:
+   ingest, vision, and index. This stopped me from treating every starter stub
+   as equally urgent. I also learned the difference between top-level data/
+   artifacts and src/doc_agent/data/ validation/versioning code.
+
+2. I created the held-out labels as genuinely human-curated ground truth. GPT
+   API discussions suggested Paddle and Qwen-family OCR/VLM options; after
+   Qwen3.5-9B produced drafts with under 5% CER against preliminary GPT/Claude
+   reference generations, I used its output only as a starting point and
+   corrected every label against the original page image. I then kept those
+   pages evaluation-only. I did not immediately fine-tune OCR just because the
+   guide mentioned it: I selected a reproducible Tesseract ben+eng baseline
+   first and required held-out evidence before adding training complexity.
+
+3. I asked for a controlled full-page diagnostic after the first pipeline OCR
+   result was poor. This isolated preprocessing/layout from the OCR engine. The
+   direct Tesseract result proved that our own transformations were causing a
+   meaningful part of the error.
+
+4. I changed the preprocessing decision based on measured CER rather than
+   visual preference. Passthrough mean CER was 0.1743, while Otsu was 0.2066
+   and the aggressive pipeline was 0.2129. Classical operations remain
+   reversible flags instead of being deleted.
+
+5. I accepted whole-page OCR for this corpus after block segmentation caused
+   catastrophic errors on some pages. This is a corpus-specific decision, not
+   a claim that region OCR is always inferior.
+
+6. I preserved historical surface text and Bengali numerals while adding
+   canonical remedy markers for retrieval. This avoids silently rewriting the
+   cited source while still helping differently spelled/transliterated remedy
+   names retrieve together.
+
+7. I required stable IDs and page provenance throughout the pipeline. A
+   retrieved answer can therefore be traced from chunk ID back to the book and
+   page, which supports our robust/grounded NFR and future citation gate.
+
+8. I did not describe a mocked embedding test as proof that BGE-M3 worked.
+   After downloading the real model to E:, I requested another full pipeline
+   check. The resulting 1024-dimensional vectors, persisted FAISS index, and
+   correct top-ranked sample pages provided real end-to-end evidence.
+
+9. I deliberately placed the large BGE-M3 cache on E: instead of filling the
+   default user cache on C:. I documented HF_HOME and offline environment
+   variables so the same checkpoint can be reused without another download.
+
+10. I learned that run_ingest.py and run_index.py have different intended
+    meanings but currently call the same complete pipeline. For A2 I use the
+    single run_index.py entry point and avoid run.sh, which is an unfinished A3
+    wrapper and would repeat work.
+
+11. I requested a repository guide containing exact setup/build/query/test
+    commands instead of relying on remembered shell history. This resulted in
+    scripts/README.md and a passed structure check.
+
+12. I reviewed later milestones early enough to protect A3 requirements. The
+    A2 index retains Chunk.score support and provenance needed by the mandatory
+    evidence-gated re-search and citation behavior in A3.
+
+13. I kept training/train.py out of the A2 runtime because no component is
+    currently fine-tuned. If training is later justified, it must include the
+    DataModule, LightningModule, seeded trainer, tracking, separate train data,
+    and checkpoint/metric evidence—not only a call to trainer.fit.
+
+14. I considered replacing Tesseract with PaddleOCR-VL 1.6 on Kaggle, but I did
+    not accept an unsupported vLLM/T4 configuration just because it sounded
+    faster. After checking the official hardware requirements, I selected
+    native Paddle as the future experiment and deferred implementation. The
+    experimental model must beat the baseline on our Bengali pages before it
+    becomes the default.
+
+15. I checked the licensing/public-domain basis for both source books before
+    bulk-downloading them into the repository, rather than assuming an old
+    scan is automatically free to redistribute. Raw page images stay
+    gitignored regardless, but the provenance record now states the basis
+    for treating the text as usable, not just a download URL.
+
+16. I did not stop at reporting mean CER differences between preprocessing
+    variants. A paired bootstrap over the five held-out pages showed the
+    passthrough-vs-Otsu gap was more than page-to-page noise, but also showed
+    the passthrough-vs-autocontrast-only comparison could not be
+    distinguished at this sample size — so autocontrast-only was kept as an
+    equally valid classical-mode default rather than silently discarded.
+
+17. I broke the aggregate CER numbers down by error category (vowel signs,
+    conjuncts, Bengali numerals, punctuation, Latin remedy names) instead of
+    treating one CER value as a complete diagnosis. This showed conjuncts and
+    vowel signs, not Latin text, were driving most of the remaining error,
+    which is more actionable than the mean alone.
+
+18. I added a confidence-based review queue as an advisory signal, not a
+    quality gate: low-confidence pages are still indexed, but flagged and
+    ranked for a manual spot-check, so OCR quality assurance does not depend
+    on eyeballing pages in an arbitrary order and retrieval coverage is never
+    silently reduced by an automatic cutoff.
+
+19. I added a reproducibility manifest (git commit, config hash, artifact
+    checksums, pinned environment) written at the end of a successful index
+    build, and a build-id cross-check between chunks.json and index.faiss, so
+    that "this index came from this exact config and code" is a verifiable
+    claim rather than something inferred after the fact, and a chunks/index
+    mismatch fails loudly at load time instead of silently returning the
+    wrong text for a retrieved vector.
+
+20. I drafted early candidate engineering principles from A2 decisions ahead
+    of A4's requirement to map real decisions to transferable principles,
+    so the reasoning is captured while it is fresh instead of reconstructed
+    retroactively; these remain drafts to be revisited once A3 adds more
+    decisions to draw from.
+
+21. The main AI contribution was repository inspection, implementation help,
+    command execution, test generation, benchmark automation, and explanation
+    of trade-offs, split across two roles: GPT/Codex drove the coding session
+    inside the repository, while Claude was consulted separately for
+    model-landscape comparisons (OCR/VLM candidates, embedding-model
+    candidates, lightweight Kaggle-T4 fallbacks) and for cross-checking
+    hardware/backend claims before they were acted on. My contribution was
+    selecting the corpus-specific goals, repeatedly questioning weak
+    assumptions, requesting controlled comparisons, choosing the E-drive
+    setup, deciding to preserve reversible baselines, and requiring evidence
+    before promoting preprocessing, OCR, or embedding alternatives.
+
+22. Every OCR-engine and embedding-model comparison (Tesseract vs
+    PaddleOCR-VL vs Qwen-VL vs dots.ocr vs Surya; BGE-M3 vs multilingual-E5
+    vs GTE-multilingual) was framed the same way: same held-out pages, same
+    metric definitions, latency reported alongside accuracy, and no swap of
+    the production default without a documented, reproducible margin over
+    the existing baseline. This kept exploratory model shopping from quietly
+    becoming an unverified pipeline change.
+
+23. Remaining work is stated honestly: the full books still need to be fetched
+    and the final full-corpus index/evidence generated; PaddleOCR-VL, dots.ocr,
+    and Surya remain planned benchmarks, not completed pipeline features; the
+    embedding-model comparison in Turn 6G and the chunk-boundary retrieval
+    check in Turn 6H were design/diagnostic discussions, not completed
+    swap-out experiments; the bootstrap significance check and error taxonomy
+    need to be re-run against the full corpus rather than the five/two-page
+    smoke sets; A3 agent/evaluation and A4 serving/governance stubs are later
+    milestones.
+
+==========================================================================
+END OF TRANSCRIPT
+==========================================================================
