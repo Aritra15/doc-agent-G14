@@ -14,8 +14,12 @@ axes:
 
 corpus:
   path: data/raw/                   # where the scanned page-images live
-  pages: 0                          # TODO fill real count from notebooks/eda.ipynb (floor: >= 300)
-  words: 0                          # TODO fill real count from notebooks/eda.ipynb (floor: >= 60000)
+  pages: 1107                       # real: bk1=662 (test) + bk2=445 (train), both post JP2->PNG conversion. Floor >=300 cleared.
+  words: 80901                      # real, OCR-measured on bk2 (train) only via notebooks/eda.ipynb; bk1 (test/held-out)
+                                     # intentionally not bulk-explored, to avoid peeking at the eval set. bk2 alone already
+                                     # clears the >=60000 floor. NOTE: measured on a pre-QUOTE_NONE-fix snapshot -- likely a
+                                     # modest undercount on quote-containing pages; re-run eda.ipynb from current main for
+                                     # the fully accurate figure before final submission.
   provenance: data/provenance.md    # source + licence + counts
 
 heldout:
